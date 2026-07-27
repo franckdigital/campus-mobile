@@ -27,9 +27,6 @@ const POLL_DELAY_MS = 3000;
 export const fmt  = (v) => (v != null ? `${parseFloat(v).toLocaleString('fr-FR')} F` : '--');
 export const fmtN = (v) => (v != null ? parseFloat(v).toLocaleString('fr-FR') : '--');
 
-export const REG_FEE_RE     = /inscri|regist/i;
-export const TUITION_FEE_RE = /tuition|scolarit/i;
-
 const INSTALLMENT_STATUS = {
   PAYE:      { label: 'Payé',      color: '#059669', bg: '#D1FAE5' },
   PARTIEL:   { label: 'Partiel',   color: '#D97706', bg: '#FEF3C7' },
@@ -37,16 +34,14 @@ const INSTALLMENT_STATUS = {
   A_VENIR:   { label: 'À venir',   color: '#6B7280', bg: '#F3F4F6' },
 };
 
-// Aggregate ALL non-cancelled invoices matching a fee-type regex (there can
-// be more than one scolarité invoice for a student), instead of picking a
-// single invoice via .find() — that single-invoice approach is what caused
-// the header/cards to show a different (and lower) total than the aggregate
-// "Progression des paiements" figure whenever a student had more than one
-// invoice of the same type.
-export function aggregateInvoices(invoicesList, feeTypeRe) {
-  const list = (invoicesList || []).filter(
-    (inv) => inv.status !== 'CANCELLED' && (inv.fee_type_codes || []).some((c) => feeTypeRe.test(c))
-  );
+// Aggregate ALL non-cancelled invoices (there can be more than one scolarité
+// invoice for a student — there's only a single fee type now) instead of
+// picking a single invoice via .find() — that single-invoice approach is what
+// caused the header/cards to show a different (and lower) total than the
+// aggregate "Progression des paiements" figure whenever a student had more
+// than one invoice.
+export function aggregateInvoices(invoicesList) {
+  const list = (invoicesList || []).filter((inv) => inv.status !== 'CANCELLED');
   return {
     list,
     total:   list.reduce((s, inv) => s + parseFloat(inv.total || 0), 0),
@@ -56,7 +51,7 @@ export function aggregateInvoices(invoicesList, feeTypeRe) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   FinStat  —  used in the header's INSCRIPTION / SCOLARITÉ grid
+   FinStat  —  used in the header's SCOLARITÉ grid
    ══════════════════════════════════════════════════════════════════════════ */
 
 export function FinStat({ label, value, paid, danger }) {
@@ -74,47 +69,37 @@ export function FinStat({ label, value, paid, danger }) {
    PaymentTab  —  progress card + free payment + prepare banner + fee cards
    ══════════════════════════════════════════════════════════════════════════ */
 
-export function PaymentTab({ summary, invoices, payments, pct, tuition, tuitionOnly, paid, remaining,
+export function PaymentTab({ summary, invoices, payments, pct, tuition, paid, remaining,
   onPayPress, onPrepareInvoices, preparingInvoices, onFreePay, echeancier,
   prepareTitle = 'Préparer mon dossier de paiement',
   prepareSub = 'Appuyez pour créer vos factures et activer le paiement' }) {
 
-  const regFee      = parseFloat(summary?.registration_fee || 0);
   const hasInvoices = summary?.has_invoices ?? invoices.length > 0;
-  const needsPrepare = !hasInvoices && (tuition > 0 || regFee > 0);
+  const needsPrepare = !hasInvoices && tuition > 0;
   const lastPayments = (payments || []).slice(0, 3);
 
-  // Aggregated across ALL matching invoices (a student can have more than
-  // one scolarité invoice) so these cards agree with the header and the
-  // "Progression des paiements" card above, which are both aggregate-based.
-  const regAgg     = aggregateInvoices(invoices, REG_FEE_RE);
-  const tuitionAgg = aggregateInvoices(invoices, TUITION_FEE_RE);
+  // Aggregated across ALL non-cancelled invoices (a student can have more
+  // than one scolarité invoice — there's only one fee type now) so this card
+  // agrees with the header and the "Progression des paiements" card above,
+  // which are both aggregate-based.
+  const invAgg = aggregateInvoices(invoices);
 
-  const hasRegInvoices     = regAgg.list.length > 0;
-  const regInvTotal        = hasRegInvoices ? regAgg.total   : regFee;
-  const regInvPaid         = hasRegInvoices ? regAgg.paid    : 0;
-  const regInvBalance      = hasRegInvoices ? regAgg.balance : 0;
+  const hasRealInvoices = invAgg.list.length > 0;
+  const invTotal   = hasRealInvoices ? invAgg.total   : tuition;
+  const invPaid    = hasRealInvoices ? invAgg.paid    : paid;
+  const invBalance = hasRealInvoices ? invAgg.balance : remaining;
   // Target invoice to open the pay modal against — the modal can only pay
   // down one invoice at a time, so pick the first one still owing.
-  const regPayTarget = regAgg.list.find((inv) => parseFloat(inv.balance) > 0) || regAgg.list[0];
+  const payTarget = invAgg.list.find((inv) => parseFloat(inv.balance) > 0) || invAgg.list[0];
 
-  const hasTuitionInvoices = tuitionAgg.list.length > 0;
-  // Fall back to the scolarité-only total (tuitionOnly), not the grand total
-  // (tuition = inscription + scolarité) — otherwise, when a student has no
-  // scolarité invoice yet, this card shows the combined total instead of 0,
-  // which happens to look identical to the inscription amount and is
-  // misleading (mirrors the already-correct pattern in FinanceScreen.js).
-  const tuitionInvTotal    = hasTuitionInvoices ? tuitionAgg.total   : tuitionOnly;
-  const tuitionInvPaid     = hasTuitionInvoices ? tuitionAgg.paid    : paid;
-  const tuitionInvBalance  = hasTuitionInvoices ? tuitionAgg.balance : remaining;
-  const tuitionPayTarget = tuitionAgg.list.find((inv) => parseFloat(inv.balance) > 0) || tuitionAgg.list[0];
-
-  // When real invoices exist, their aggregated balance is the source of truth —
-  // the scalar registration_fee_paid flag can lag behind (it tracks a single
-  // fee amount that may no longer match the sum of all registration invoices),
-  // and OR-ing it in was hiding the pay button even with money still owed.
-  const regInvoicePaid = hasRegInvoices ? regInvBalance <= 0 : false;
-  const regFeePaid = hasRegInvoices ? regInvoicePaid : (summary?.registration_fee_paid || false);
+  // Enrollment (is_enrolled) is a cumulative-payment threshold now, entirely
+  // separate from invoice balances — a student can be "inscrit" while still
+  // owing money on the (partially-payable) scolarité total.
+  const isEnrolled = !!summary?.is_enrolled;
+  const minEnrollmentPayment = summary?.min_enrollment_payment != null ? parseFloat(summary.min_enrollment_payment) : null;
+  const enrollmentGap = minEnrollmentPayment != null
+    ? Math.max(0, minEnrollmentPayment - parseFloat(paid || 0))
+    : null;
 
   return (
     <>
@@ -171,110 +156,65 @@ export function PaymentTab({ summary, invoices, payments, pct, tuition, tuitionO
         </TouchableOpacity>
       )}
 
-      {/* ── inscription card ── */}
-      {regFee > 0 && (
-        <View style={[styles.feeCard, regFeePaid ? styles.feeCardPaid : styles.feeCardPending]}>
-          <View style={styles.feeCardHeader}>
-            <View style={[styles.feeIcon, { backgroundColor: regFeePaid ? '#D1FAE5' : '#FEF3C7' }]}>
-              <Ionicons
-                name={regFeePaid ? 'checkmark-circle' : 'alert-circle'}
-                size={22}
-                color={regFeePaid ? colors.success : colors.warning}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.feeLabel}>Frais d'inscription</Text>
-              {hasRegInvoices ? (
-                <Text style={[styles.feeStatus, {
-                  color: regInvBalance <= 0 ? colors.success : colors.warning,
-                }]}>
-                  {regInvBalance <= 0
-                    ? 'Soldé ✓'
-                    : `${fmt(regInvBalance)} restants`}
-                </Text>
-              ) : (
-                <Text style={[styles.feeStatus, { color: regFeePaid ? colors.success : colors.warning }]}>
-                  {regFeePaid ? 'Soldé ✓' : 'Non validée'}
-                </Text>
-              )}
-            </View>
-            <Text style={styles.feeAmount}>{fmt(regInvTotal)}</Text>
-          </View>
-
-          <View style={styles.feePaidRow}>
-            <Text style={styles.feePaidLabel}>Montant payé</Text>
-            <Text style={[styles.feePaidValue, { color: colors.success }]}>
-              {fmt(hasRegInvoices ? regInvPaid : (regFeePaid ? regFee : 0))}
-            </Text>
-          </View>
-
-          {hasRegInvoices && (
-            <View style={styles.progressBarSlim}>
-              <View style={[styles.progressFillSlim, {
-                width: `${regInvTotal > 0
-                  ? Math.min(100, (regInvPaid / regInvTotal) * 100)
-                  : 0}%`,
-                backgroundColor: regInvBalance <= 0
-                  ? colors.success
-                  : regInvPaid > 0 ? colors.warning : colors.danger,
-              }]} />
-            </View>
-          )}
-
-          {!regFeePaid && regPayTarget && parseFloat(regPayTarget.balance) > 0 && (
-            <TouchableOpacity
-              style={[styles.payBtn, { backgroundColor: '#D97706' }]}
-              onPress={() => onPayPress(regPayTarget)}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="phone-portrait-outline" size={16} color="#fff" />
-              <Text style={styles.payBtnText}>Payer {fmt(regPayTarget.balance)} — Mobile Money</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      )}
-
-      {/* ── scolarité card ── */}
-      {(tuitionOnly > 0 || hasTuitionInvoices) && (
-        <View style={styles.feeCard}>
+      {/* ── scolarité card (single fee type, partial payments allowed) ── */}
+      {(tuition > 0 || hasRealInvoices) && (
+        <View style={[styles.feeCard, isEnrolled ? styles.feeCardPaid : styles.feeCardPending]}>
           <View style={styles.feeCardHeader}>
             <View style={[styles.feeIcon, { backgroundColor: '#EEF2FF' }]}>
               <Ionicons name="book-outline" size={22} color={colors.primary} />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.feeLabel}>Frais de scolarité</Text>
-              {hasTuitionInvoices ? (
-                <Text style={[styles.feeStatus, { color: tuitionInvBalance > 0 ? colors.danger : colors.success }]}>
-                  {tuitionInvBalance > 0 ? `${fmt(tuitionInvBalance)} restants` : 'Soldé ✓'}
+              {hasRealInvoices ? (
+                <Text style={[styles.feeStatus, { color: invBalance > 0 ? colors.danger : colors.success }]}>
+                  {invBalance > 0 ? `${fmt(invBalance)} restants` : 'Soldé ✓'}
                 </Text>
               ) : (
                 <Text style={[styles.feeStatus, { color: colors.textSecondary }]}>En attente de facturation</Text>
               )}
             </View>
-            <Text style={styles.feeAmount}>{fmt(tuitionInvTotal)}</Text>
+            <Text style={styles.feeAmount}>{fmt(invTotal)}</Text>
           </View>
 
           <View style={styles.feePaidRow}>
             <Text style={styles.feePaidLabel}>Montant payé</Text>
-            <Text style={[styles.feePaidValue, { color: colors.success }]}>{fmt(tuitionInvPaid)}</Text>
+            <Text style={[styles.feePaidValue, { color: colors.success }]}>{fmt(invPaid)}</Text>
           </View>
 
-          {hasTuitionInvoices && (
+          {hasRealInvoices && (
             <View style={styles.progressBarSlim}>
               <View style={[styles.progressFillSlim, {
-                width: `${tuitionInvTotal > 0
-                  ? Math.min(100, (tuitionInvPaid / tuitionInvTotal) * 100)
+                width: `${invTotal > 0
+                  ? Math.min(100, (invPaid / invTotal) * 100)
                   : 0}%`,
-                backgroundColor: tuitionInvBalance <= 0
-                  ? colors.success : tuitionInvPaid > 0 ? colors.warning : colors.danger,
+                backgroundColor: invBalance <= 0
+                  ? colors.success : invPaid > 0 ? colors.warning : colors.danger,
               }]} />
             </View>
           )}
 
-          {tuitionPayTarget && parseFloat(tuitionPayTarget.balance) > 0 && (
-            <TouchableOpacity style={styles.payBtn} onPress={() => onPayPress(tuitionPayTarget)} activeOpacity={0.8}>
+          {/* ── enrollment status — cumulative-payment threshold, independent
+              of the invoice balance above (a student can still owe money on
+              the scolarité total while already being "inscrit") ── */}
+          <View style={[styles.enrollStatusRow, { backgroundColor: isEnrolled ? '#D1FAE5' : '#FEF3C7' }]}>
+            <Ionicons
+              name={isEnrolled ? 'checkmark-circle' : 'alert-circle'}
+              size={16}
+              color={isEnrolled ? colors.success : colors.warning}
+            />
+            <Text style={[styles.enrollStatusText, { color: isEnrolled ? colors.success : colors.warning }]}>
+              {isEnrolled
+                ? 'Inscrit ✓'
+                : `Non inscrit — reste ${fmt(enrollmentGap ?? 0)}${
+                    minEnrollmentPayment != null ? ` (minimum ${fmt(minEnrollmentPayment)})` : ''
+                  }`}
+            </Text>
+          </View>
+
+          {payTarget && parseFloat(payTarget.balance) > 0 && (
+            <TouchableOpacity style={styles.payBtn} onPress={() => onPayPress(payTarget)} activeOpacity={0.8}>
               <Ionicons name="phone-portrait-outline" size={16} color="#fff" />
-              <Text style={styles.payBtnText}>Payer {fmt(tuitionPayTarget.balance)} — Mobile Money</Text>
+              <Text style={styles.payBtnText}>Payer {fmt(payTarget.balance)} — Mobile Money</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -286,7 +226,7 @@ export function PaymentTab({ summary, invoices, payments, pct, tuition, tuitionO
           <Text style={styles.sectionTitle}>Échéancier de scolarité</Text>
           {echeancier.installments.map((inst) => {
             const st = INSTALLMENT_STATUS[inst.status] || INSTALLMENT_STATUS.A_VENIR;
-            const payable = inst.status !== 'PAYE' && !!tuitionPayTarget;
+            const payable = inst.status !== 'PAYE' && !!payTarget;
             return (
               <View key={inst.id} style={styles.installmentCard}>
                 <View style={{ flex: 1 }}>
@@ -305,8 +245,8 @@ export function PaymentTab({ summary, invoices, payments, pct, tuition, tuitionO
                   <TouchableOpacity
                     style={styles.installmentPayBtn}
                     onPress={() => onPayPress(
-                      tuitionPayTarget,
-                      Math.min(parseFloat(inst.amount), parseFloat(tuitionPayTarget.balance || 0)),
+                      payTarget,
+                      Math.min(parseFloat(inst.amount), parseFloat(payTarget.balance || 0)),
                       inst.label
                     )}
                     activeOpacity={0.8}
@@ -341,7 +281,7 @@ export function PaymentTab({ summary, invoices, payments, pct, tuition, tuitionO
         </View>
       )}
 
-      {tuition === 0 && regFee === 0 && (
+      {tuition === 0 && (
         <EmptyState icon="wallet-outline" title="Aucune information financière" subtitle="Les frais apparaîtront ici une fois configurés." />
       )}
     </>
@@ -410,10 +350,6 @@ export function PaymentModal({ visible, invoice, onClose, onSuccess }) {
   const [isNetErr,      setIsNetErr]      = useState(false);
   const [capturedTxId,  setCapturedTxId]  = useState(null);
   const abortRef = useRef(false);
-
-  // Inscription is always paid in one single, full payment — no staggered
-  // (½/⅓/libre) tranches, unlike scolarité which supports partial payments.
-  const isRegistration = (invoice?.fee_type_codes || []).some((c) => REG_FEE_RE.test(c));
 
   const balance = parseFloat(invoice?.balance || 0);
   const total   = parseFloat(invoice?.total   || 0);
@@ -569,63 +505,49 @@ export function PaymentModal({ visible, invoice, onClose, onSuccess }) {
                 <Text style={styles.modalProgressLabel}>{pct.toFixed(0)}% réglé</Text>
               </View>
 
-              {/* tranche selector — inscription is always full-payment only,
-                  no staggered options, amount auto-filled and locked */}
-              {isRegistration ? (
-                <View style={styles.fullPayLockBox}>
-                  <Ionicons name="lock-closed" size={16} color={colors.primary} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.fullPayLockTitle}>Montant à payer : {fmt(balance)}</Text>
-                    <Text style={styles.fullPayLockSub}>
-                      L'inscription se paie intégralement, en un seul versement.
-                    </Text>
-                  </View>
-                </View>
-              ) : (
-                <>
-                  <Text style={styles.modalSectionTitle}>Choisir votre versement</Text>
-                  <View style={styles.trancheGrid}>
-                    {tranches.map((t) => {
-                      const active = selected === t.key;
-                      return (
-                        <TouchableOpacity
-                          key={t.key}
-                          style={[styles.trancheChip, active && styles.trancheChipActive]}
-                          onPress={() => setSelected(t.key)}
-                          activeOpacity={0.8}
-                        >
-                          {active && (
-                            <View style={styles.trancheCheck}>
-                              <Ionicons name="checkmark" size={10} color="#fff" />
-                            </View>
-                          )}
-                          <Text style={[styles.trancheLabel, active && styles.trancheLabelActive]}>{t.label}</Text>
-                          {t.amount != null ? (
-                            <Text style={[styles.trancheAmount, active && styles.trancheAmountActive]}>{fmt(t.amount)}</Text>
-                          ) : (
-                            <Text style={[styles.trancheSub, active && { color: 'rgba(255,255,255,0.75)' }]}>{t.sub}</Text>
-                          )}
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
+              {/* tranche selector — scolarité always supports partial
+                  payments, no all-or-nothing special case */}
+              <Text style={styles.modalSectionTitle}>Choisir votre versement</Text>
+              <View style={styles.trancheGrid}>
+                {tranches.map((t) => {
+                  const active = selected === t.key;
+                  return (
+                    <TouchableOpacity
+                      key={t.key}
+                      style={[styles.trancheChip, active && styles.trancheChipActive]}
+                      onPress={() => setSelected(t.key)}
+                      activeOpacity={0.8}
+                    >
+                      {active && (
+                        <View style={styles.trancheCheck}>
+                          <Ionicons name="checkmark" size={10} color="#fff" />
+                        </View>
+                      )}
+                      <Text style={[styles.trancheLabel, active && styles.trancheLabelActive]}>{t.label}</Text>
+                      {t.amount != null ? (
+                        <Text style={[styles.trancheAmount, active && styles.trancheAmountActive]}>{fmt(t.amount)}</Text>
+                      ) : (
+                        <Text style={[styles.trancheSub, active && { color: 'rgba(255,255,255,0.75)' }]}>{t.sub}</Text>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
 
-                  {/* custom input */}
-                  {selected === 'custom' && (
-                    <View style={styles.customInputRow}>
-                      <TextInput
-                        style={styles.customInput}
-                        placeholder="Ex : 150 000"
-                        keyboardType="numeric"
-                        value={customAmt}
-                        onChangeText={setCustomAmt}
-                        placeholderTextColor={colors.textTertiary}
-                        autoFocus
-                      />
-                      <Text style={styles.customCurrency}>F CFA</Text>
-                    </View>
-                  )}
-                </>
+              {/* custom input */}
+              {selected === 'custom' && (
+                <View style={styles.customInputRow}>
+                  <TextInput
+                    style={styles.customInput}
+                    placeholder="Ex : 150 000"
+                    keyboardType="numeric"
+                    value={customAmt}
+                    onChangeText={setCustomAmt}
+                    placeholderTextColor={colors.textTertiary}
+                    autoFocus
+                  />
+                  <Text style={styles.customCurrency}>F CFA</Text>
+                </View>
               )}
 
               {/* pay button */}
@@ -733,9 +655,6 @@ export function PaymentModal({ visible, invoice, onClose, onSuccess }) {
    Phases: select | paying | polling | error | done
    ══════════════════════════════════════════════════════════════════════════ */
 
-// Inscription is deliberately excluded — it's always a single, full,
-// auto-filled payment via the dedicated "Frais d'inscription" card/PaymentModal,
-// never a manually-typed free-form amount (which is what this modal is for).
 const FEE_TYPES = [
   { code: 'TUITION', label: 'Scolarité' },
   { code: 'OTHER',   label: 'Autre'     },
@@ -1030,10 +949,6 @@ export function ManualMoneyModal({
   const [officialNumber, setOfficialNumber] = useState('');
 
   const invoiceBalance = invoice ? parseFloat(invoice.balance || 0) : 0;
-  // Inscription is always paid in full, in one go — every other fixed-amount
-  // payment (scolarité, échéancier tranche) lets the payer choose between
-  // settling the whole remaining balance or a partial amount.
-  const isRegistration = mode === 'fixed' && (invoice?.fee_type_codes || []).some((c) => REG_FEE_RE.test(c));
 
   useEffect(() => {
     if (visible) {
@@ -1073,7 +988,7 @@ export function ManualMoneyModal({
     const v = parseFloat(partialAmountStr.replace(/[\s,]/g, ''));
     return isNaN(v) ? 0 : v;
   })();
-  const fixedAmt = isRegistration ? invoiceBalance : (amountMode === 'full' ? invoiceBalance : partialAmt);
+  const fixedAmt = amountMode === 'full' ? invoiceBalance : partialAmt;
   const freeAmt = (() => {
     const v = parseFloat(freeAmountStr.replace(/[\s,]/g, ''));
     return isNaN(v) ? 0 : v;
@@ -1228,16 +1143,6 @@ export function ManualMoneyModal({
                       />
                     </View>
                   )}
-                </View>
-              ) : isRegistration ? (
-                <View style={styles.fullPayLockBox}>
-                  <Ionicons name="lock-closed" size={16} color={colors.primary} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.fullPayLockTitle}>Montant à payer : {fmt(amount)}</Text>
-                    <Text style={styles.fullPayLockSub}>
-                      L'inscription se paie intégralement, en un seul versement.
-                    </Text>
-                  </View>
                 </View>
               ) : (
                 <View style={styles.fieldGroup}>
@@ -1499,6 +1404,9 @@ const styles = StyleSheet.create({
   feePaidLabel:   { fontSize: 13, color: colors.textSecondary },
   feePaidValue:   { fontSize: 14, fontWeight: '700' },
 
+  enrollStatusRow:  { flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 12 },
+  enrollStatusText: { flex: 1, fontSize: 12.5, fontWeight: '700' },
+
   payBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 13, marginTop: 4 },
   payBtnText: { fontSize: 13, fontWeight: '700', color: '#fff' },
 
@@ -1582,14 +1490,6 @@ const styles = StyleSheet.create({
   modalProgressLabel: { fontSize: 11, color: colors.textSecondary, textAlign: 'right', marginTop: 3 },
 
   modalSectionTitle: { fontSize: 12, fontWeight: '800', color: colors.text, textTransform: 'uppercase', letterSpacing: 0.5 },
-
-  fullPayLockBox: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    padding: 14, borderRadius: 16,
-    backgroundColor: '#EEF2FF', borderWidth: 1, borderColor: '#E0E7FF',
-  },
-  fullPayLockTitle: { fontSize: 14, fontWeight: '800', color: colors.text },
-  fullPayLockSub:   { fontSize: 11.5, color: colors.textSecondary, marginTop: 2 },
 
   trancheGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   trancheChip: {

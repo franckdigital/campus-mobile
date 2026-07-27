@@ -15,7 +15,7 @@ import { colors, spacing, radius } from '../../theme/colors';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   PaymentTab, ManualMoneyModal, FinStat,
-  aggregateInvoices, REG_FEE_RE, TUITION_FEE_RE, fmt, fmtN,
+  aggregateInvoices, fmt, fmtN,
 } from '../../components/finance/PaymentPanel';
 
 /* ─── tabs ──────────────────────────────────────────────────────────────── */
@@ -31,7 +31,7 @@ const TABS = [
    ══════════════════════════════════════════════════════════════════════════ */
 
 export default function StudentFinanceScreen({ navigation }) {
-  const { refreshRegistrationFeeStatus } = useAuth();
+  const { refreshEnrollmentStatus } = useAuth();
   const [tab,               setTab]               = useState('summary');
   const [summary,           setSummary]           = useState(null);
   const [invoices,          setInvoices]          = useState([]);
@@ -53,10 +53,10 @@ export default function StudentFinanceScreen({ navigation }) {
       setStudentId(me.id);
       setStudent(me);
       // Keep the app-wide fee gate in sync — a successful payment here
-      // should unlock the rest of the app (registration gate AND the
+      // should unlock the rest of the app (enrollment gate AND the
       // e-learning menu's échéancier status) on this same screen refresh,
       // without waiting for a full app restart.
-      refreshRegistrationFeeStatus();
+      refreshEnrollmentStatus();
       const [sum, inv, pay, ech] = await Promise.allSettled([
         financeService.getStudentFinancialSummary(me.id),
         financeService.getInvoices({ student: me.id }),
@@ -112,25 +112,20 @@ export default function StudentFinanceScreen({ navigation }) {
 
   /* ── derived values ── */
   const tuition      = parseFloat(summary?.tuition_fee      || 0);
-  const tuitionOnly  = parseFloat(summary?.tuition_fee_only || 0);
-  const regFeeHeader = parseFloat(summary?.registration_fee || 0);
   const paid         = parseFloat(summary?.total_paid       || 0);
   const remaining    = parseFloat(summary?.remaining_balance || 0);
   const pct          = tuition > 0 ? Math.min((paid / tuition) * 100, 100) : 0;
+  const isEnrolled   = !!summary?.is_enrolled;
+  const minEnrollmentPayment = summary?.min_enrollment_payment != null ? parseFloat(summary.min_enrollment_payment) : null;
 
-  // Per-section header data — aggregated across ALL matching invoices so
-  // this always agrees with "Progression des paiements" below, regardless
-  // of how many separate inscription/scolarité invoices the student has.
-  const regAgg      = aggregateInvoices(invoices, REG_FEE_RE);
-  const tuitionAgg  = aggregateInvoices(invoices, TUITION_FEE_RE);
+  // Header data — aggregated across ALL invoices so this always agrees with
+  // "Progression des paiements" below, regardless of how many separate
+  // scolarité invoices the student has.
+  const tuitionAgg  = aggregateInvoices(invoices);
 
-  const regTotal = regAgg.list.length > 0 ? regAgg.total : regFeeHeader;
-  const regPaid  = regAgg.list.length > 0 ? regAgg.paid  : (summary?.registration_fee_paid ? regFeeHeader : 0);
-  const regReste = regAgg.list.length > 0 ? regAgg.balance : (summary?.registration_fee_paid ? 0 : regFeeHeader);
-
-  const scoTotal = tuitionAgg.list.length > 0 ? tuitionAgg.total : tuitionOnly;
-  const scoPaid  = tuitionAgg.list.length > 0 ? tuitionAgg.paid  : Math.max(0, paid - regPaid);
-  const scoReste = tuitionAgg.list.length > 0 ? tuitionAgg.balance : Math.max(0, remaining - regReste);
+  const scoTotal = tuitionAgg.list.length > 0 ? tuitionAgg.total : tuition;
+  const scoPaid  = tuitionAgg.list.length > 0 ? tuitionAgg.paid  : paid;
+  const scoReste = tuitionAgg.list.length > 0 ? tuitionAgg.balance : remaining;
 
   const studentName = [
     student?.user?.first_name || student?.first_name,
@@ -194,28 +189,28 @@ export default function StudentFinanceScreen({ navigation }) {
           ) : null}
 
           {/* fees breakdown */}
-          {summary && (
+          {summary && scoTotal > 0 && (
             <View style={styles.feesGrid}>
-              {regFeeHeader > 0 && (
-                <View style={styles.feesSection}>
-                  <Text style={styles.feesSectionTitle}>INSCRIPTION</Text>
-                  <View style={styles.feesCols}>
-                    <FinStat label="TOTAL" value={fmtN(regTotal)} />
-                    <FinStat label="PAYÉ"  value={fmtN(regPaid)}  paid={regPaid > 0}   />
-                    <FinStat label="RESTE" value={fmtN(regReste)} danger={regReste > 0} />
-                  </View>
-                </View>
-              )}
-              {scoTotal > 0 && (
-                <View style={styles.feesSection}>
+              <View style={styles.feesSection}>
+                <View style={styles.feesSectionHeader}>
                   <Text style={styles.feesSectionTitle}>SCOLARITÉ</Text>
-                  <View style={styles.feesCols}>
-                    <FinStat label="TOTAL" value={fmtN(scoTotal)} />
-                    <FinStat label="PAYÉ"  value={fmtN(scoPaid)}  paid={scoPaid > 0}   />
-                    <FinStat label="RESTE" value={fmtN(scoReste)} danger={scoReste > 0} />
+                  <View style={[styles.enrollBadge, { backgroundColor: isEnrolled ? 'rgba(16,185,129,0.25)' : 'rgba(245,158,11,0.25)' }]}>
+                    <Text style={[styles.enrollBadgeText, { color: isEnrolled ? '#86EFAC' : '#FDE68A' }]}>
+                      {isEnrolled ? 'Inscrit ✓' : 'Non inscrit'}
+                    </Text>
                   </View>
                 </View>
-              )}
+                <View style={styles.feesCols}>
+                  <FinStat label="TOTAL" value={fmtN(scoTotal)} />
+                  <FinStat label="PAYÉ"  value={fmtN(scoPaid)}  paid={scoPaid > 0}   />
+                  <FinStat label="RESTE" value={fmtN(scoReste)} danger={scoReste > 0} />
+                </View>
+                {!isEnrolled && minEnrollmentPayment != null && (
+                  <Text style={styles.enrollHint}>
+                    Minimum pour être inscrit : {fmtN(minEnrollmentPayment)} FCFA
+                  </Text>
+                )}
+              </View>
             </View>
           )}
 
@@ -245,7 +240,7 @@ export default function StudentFinanceScreen({ navigation }) {
         >
           <PaymentTab
             summary={summary} invoices={invoices} payments={payments} echeancier={echeancier}
-            pct={pct} tuition={tuition} tuitionOnly={tuitionOnly} paid={paid} remaining={remaining}
+            pct={pct} tuition={tuition} paid={paid} remaining={remaining}
             onPayPress={openPayModal}
             onPrepareInvoices={handlePrepareInvoices}
             preparingInvoices={preparingInvoices}
@@ -393,8 +388,12 @@ const styles = StyleSheet.create({
   // fees breakdown grid
   feesGrid:          { gap: 8, marginBottom: spacing.md },
   feesSection:       { backgroundColor: 'rgba(0,0,0,0.22)', borderRadius: 12, padding: 12 },
-  feesSectionTitle:  { fontSize: 9, fontWeight: '800', color: 'rgba(255,255,255,0.55)', letterSpacing: 1.2, marginBottom: 10 },
+  feesSectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  feesSectionTitle:  { fontSize: 9, fontWeight: '800', color: 'rgba(255,255,255,0.55)', letterSpacing: 1.2 },
   feesCols:          { flexDirection: 'row' },
+  enrollBadge:       { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+  enrollBadgeText:   { fontSize: 9, fontWeight: '800' },
+  enrollHint:        { fontSize: 10, color: 'rgba(255,255,255,0.6)', marginTop: 8 },
 
   tabs:          { flexDirection: 'row', gap: spacing.sm, paddingBottom: spacing.md },
   tab:           { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: radius.md, backgroundColor: 'rgba(255,255,255,0.15)' },

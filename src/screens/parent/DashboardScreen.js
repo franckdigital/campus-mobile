@@ -42,10 +42,9 @@ export default function ParentDashboardScreen({ navigation }) {
           _tuition: s.tuition_fee,
           _paid: s.total_paid,
           _remaining: s.remaining_balance,
-          _registration_fee: s.registration_fee,
           _configured_tuition: s.configured_tuition_fee,
-          _configured_reg: s.configured_registration_fee,
-          registration_fee_paid: s.registration_fee_paid,
+          _min_enrollment_payment: s.min_enrollment_payment,
+          is_enrolled: s.is_enrolled,
         } : child;
         });
         setChildren(enriched);
@@ -84,7 +83,7 @@ export default function ParentDashboardScreen({ navigation }) {
   const multiSite = sites.length > 1;
   const visibleChildren = selectedSite === 'all' ? children : children.filter(c => String(c.site) === selectedSite);
 
-  const enrolledCount = visibleChildren.filter((c) => c.registration_fee_paid || c.status === 'ACTIVE').length;
+  const enrolledCount = visibleChildren.filter((c) => c.is_enrolled || c.status === 'ACTIVE').length;
   // Use enriched _remaining when available (computed from real invoices), fallback to stale field
   const totalRemaining = visibleChildren.reduce((acc, c) => acc + parseFloat(c._remaining ?? c.remaining_balance ?? 0), 0);
 
@@ -239,11 +238,10 @@ function ChildCard({ child, onPress }) {
     'Enfant';
   const initials = name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 
-  const paid           = parseFloat(child._paid ?? child.total_paid ?? 0);
-  const isEnrolled     = !!(child.registration_fee_paid || child.status === 'ACTIVE');
-  const regFee         = parseFloat(child._configured_reg ?? child._registration_fee ?? 0);
-  const configTuition  = parseFloat(child._configured_tuition ?? 0);
-  const tuitionPaidCard = isEnrolled && regFee > 0 ? Math.max(0, paid - regFee) : 0;
+  const paid            = parseFloat(child._paid ?? child.total_paid ?? 0);
+  const isEnrolled      = !!(child.is_enrolled || child.status === 'ACTIVE');
+  const configTuition   = parseFloat(child._configured_tuition ?? 0);
+  const tuitionPaidCard = paid;
   const tuitionRemCard  = Math.max(0, configTuition - tuitionPaidCard);
   const tuitionPctCard  = configTuition > 0 ? Math.min(100, Math.round((tuitionPaidCard / configTuition) * 100)) : 0;
 

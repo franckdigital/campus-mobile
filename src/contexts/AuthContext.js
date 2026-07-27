@@ -10,7 +10,10 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   // null = not a student / not yet known; true/false once resolved for a student
-  const [registrationFeePaid, setRegistrationFeePaid] = useState(null);
+  const [isEnrolled, setIsEnrolled] = useState(null);
+  // Configurable minimum cumulative payment (FCFA) required to be considered
+  // "inscrit" — for display only, the backend is the source of truth.
+  const [minEnrollmentPayment, setMinEnrollmentPayment] = useState(null);
   // Échéancier de scolarité — only used to lock e-learning resources for
   // ELEARNING-modality students, see AppNavigator.
   const [studentModality, setStudentModality] = useState(null);
@@ -19,7 +22,8 @@ export const AuthProvider = ({ children }) => {
 
   const loadStudentFeeStatus = useCallback(async (profile) => {
     if (profile?.user_type?.toLowerCase() !== 'student') {
-      setRegistrationFeePaid(null);
+      setIsEnrolled(null);
+      setMinEnrollmentPayment(null);
       setStudentModality(null);
       setTuitionUpToDate(true);
       setEcheanceOverride(false);
@@ -27,14 +31,17 @@ export const AuthProvider = ({ children }) => {
     }
     try {
       const student = await studentService.getMe();
-      setRegistrationFeePaid(!!student?.registration_fee_paid);
+      setIsEnrolled(!!student?.is_enrolled);
       setStudentModality(student?.modality || null);
       setTuitionUpToDate(student?.tuition_up_to_date ?? true);
       setEcheanceOverride(!!student?.echeance_override);
+      if (student?.min_enrollment_payment != null) {
+        setMinEnrollmentPayment(student.min_enrollment_payment);
+      }
     } catch {
       // Fail open — the backend still enforces the real gate; don't lock the
       // whole app out just because this lookup failed.
-      setRegistrationFeePaid(true);
+      setIsEnrolled(true);
       setTuitionUpToDate(true);
     }
   }, []);
@@ -69,7 +76,8 @@ export const AuthProvider = ({ children }) => {
       await authService.logout();
     } catch {}
     setUser(null);
-    setRegistrationFeePaid(null);
+    setIsEnrolled(null);
+    setMinEnrollmentPayment(null);
     setStudentModality(null);
     setTuitionUpToDate(true);
     setEcheanceOverride(false);
@@ -87,9 +95,9 @@ export const AuthProvider = ({ children }) => {
   return (
     <AuthContext.Provider value={{
       user, loading, login, logout, refreshUser, userType,
-      registrationFeePaid, setRegistrationFeePaid,
+      isEnrolled, setIsEnrolled, minEnrollmentPayment,
       studentModality, tuitionUpToDate, echeanceOverride,
-      refreshRegistrationFeeStatus: () => loadStudentFeeStatus(user),
+      refreshEnrollmentStatus: () => loadStudentFeeStatus(user),
     }}>
       {children}
     </AuthContext.Provider>

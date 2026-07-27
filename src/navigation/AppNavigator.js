@@ -27,7 +27,7 @@ function NotificationSetup({ navigationRef }) {
 }
 
 export default function AppNavigator({ navigationRef }) {
-  const { user, loading, registrationFeePaid } = useAuth();
+  const { user, loading, isEnrolled } = useAuth();
 
   if (loading) return <LoadingScreen />;
 
@@ -40,9 +40,9 @@ export default function AppNavigator({ navigationRef }) {
   }
 
   const type = user.user_type?.toLowerCase();
-  // registrationFeePaid is null until resolved for a student — treat that
+  // isEnrolled is null until resolved for a student — treat that
   // as "not blocked yet" rather than forcing the Finance tab prematurely.
-  const studentFeeBlocked = type === 'student' && registrationFeePaid === false;
+  const studentFeeBlocked = type === 'student' && isEnrolled === false;
 
   return (
     <>
@@ -53,15 +53,16 @@ export default function AppNavigator({ navigationRef }) {
         ? <TeacherNavigator />
         : type === 'parent'
           ? <ParentNavigator />
-          // Registration fee unpaid, OR échéancier de scolarité en retard for
-          // an ELEARNING/HYBRIDE student: the full tab bar stays
+          // Not yet enrolled (cumulative payments below the minimum
+          // threshold), OR échéancier de scolarité en retard for an
+          // ELEARNING/HYBRIDE student: the full tab bar stays
           // (Accueil/Notes/Finance/Présence/Plus) so navigation is never a
           // dead end and the student can still reach Finance to pay — only
           // the e-learning module itself is locked (StudentNavigator's "Plus"
           // menu + ELearningHomeScreen already hide/block it based on
           // tuitionUpToDate/echeanceOverride). The backend gate
-          // (IsRegistrationFeePaidOrExempt / élearning permission) still
-          // blocks every gated endpoint regardless of which tab they're on.
+          // (IsEnrolledOrExempt / élearning permission) still blocks every
+          // gated endpoint regardless of which tab they're on.
           : <StudentNavigator initialTab={studentFeeBlocked ? 'Finance' : undefined} />}
     </>
   );

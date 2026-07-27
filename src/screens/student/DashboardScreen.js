@@ -16,9 +16,6 @@ import { colors, spacing, radius } from '../../theme/colors';
 
 const HEADER_GRADIENT = ['#1E3A8A', '#1D4ED8', '#2563EB'];
 
-const REG_FEE_RE     = /inscri|regist/i;
-const TUITION_FEE_RE = /tuition|scolarit/i;
-
 const fmtN = (v) => (v != null ? parseFloat(v).toLocaleString('fr-FR') : '--');
 
 function FinStat({ label, value, paid, danger }) {
@@ -33,14 +30,12 @@ function FinStat({ label, value, paid, danger }) {
 }
 
 // Same aggregation as the Finance screen — sums ALL non-cancelled invoices
-// matching a fee-type regex, so the dashboard's split figures always agree
+// (there's only one fee type now), so the dashboard's figures always agree
 // with what "Voir tout" shows, instead of relying on the summary's scalar
-// registration_fee/tuition_fee_only fields (which can drift from the real
-// invoiced amounts when a student has more than one invoice per fee type).
-function aggregateInvoices(invoicesList, feeTypeRe) {
-  const list = (invoicesList || []).filter(
-    (inv) => inv.status !== 'CANCELLED' && (inv.fee_type_codes || []).some((c) => feeTypeRe.test(c))
-  );
+// tuition_fee field alone (which can drift from the real invoiced amounts
+// when a student has more than one invoice).
+function aggregateInvoices(invoicesList) {
+  const list = (invoicesList || []).filter((inv) => inv.status !== 'CANCELLED');
   return {
     list,
     total:   list.reduce((s, inv) => s + parseFloat(inv.total || 0), 0),
@@ -141,13 +136,15 @@ export default function StudentDashboardScreen({ navigation }) {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Bonjour' : hour < 18 ? 'Bon après-midi' : 'Bonsoir';
 
-  // Prefer dynamic financial_summary (computes registration_fee_paid from invoice balance)
+  // Prefer dynamic financial_summary (computes is_enrolled from cumulative payments)
   const tuition   = parseFloat(financialSummary?.tuition_fee      ?? student?.tuition_fee      ?? 0);
   const paid      = parseFloat(financialSummary?.total_paid        ?? student?.total_paid        ?? 0);
   const remaining = parseFloat(financialSummary?.remaining_balance ?? student?.remaining_balance ?? 0);
   const pct       = tuition > 0 ? Math.min(100, Math.round((paid / tuition) * 100)) : 0;
-  const regFeePaid = financialSummary?.registration_fee_paid ?? student?.registration_fee_paid ?? false;
-  const regFee    = parseFloat(financialSummary?.registration_fee ?? student?.registration_fee ?? 0);
+  const isEnrolled = financialSummary?.is_enrolled ?? student?.is_enrolled ?? false;
+  const minEnrollmentPayment = financialSummary?.min_enrollment_payment != null
+    ? parseFloat(financialSummary.min_enrollment_payment) : null;
+  const enrollmentGap = minEnrollmentPayment != null ? Math.max(0, minEnrollmentPayment - paid) : null;
 
   // Échéancier de scolarité (payment installment schedule)
   const hasPaymentSchedule = financialSummary?.has_payment_schedule ?? student?.has_payment_schedule ?? false;
@@ -161,23 +158,15 @@ export default function StudentDashboardScreen({ navigation }) {
   const canSeeElearning = (studentModality === 'ELEARNING' || studentModality === 'HYBRIDE')
     && (tuitionUpToDate || echeanceOverride);
 
-  // Split the combined tuition+registration total (`tuition`) into its two
-  // parts so "Situation financière" can show them separately, like the
-  // Finance screen does — aggregated from the real invoices (same method as
-  // FinanceScreen) so the two screens always agree, rather than trusting the
-  // summary's scalar registration_fee/tuition_fee_only fields on their own.
-  const tuitionOnly = parseFloat(financialSummary?.tuition_fee_only ?? 0);
-  const regAgg      = aggregateInvoices(invoices, REG_FEE_RE);
-  const tuitionAgg  = aggregateInvoices(invoices, TUITION_FEE_RE);
+  // Aggregated from the real invoices (same method as FinanceScreen) so the
+  // two screens always agree, rather than trusting the summary's scalar
+  // tuition_fee field alone.
+  const tuitionAgg = aggregateInvoices(invoices);
 
-  const regTotal      = regAgg.list.length > 0 ? regAgg.total : regFee;
-  const regPaidAmt    = regAgg.list.length > 0 ? regAgg.paid : (regFeePaid ? regFee : 0);
-  const regRemaining  = regAgg.list.length > 0 ? regAgg.balance : (regFeePaid ? 0 : regFee);
-
-  const scoTotal      = tuitionAgg.list.length > 0 ? tuitionAgg.total : tuitionOnly;
-  const scoPaidAmt     = tuitionAgg.list.length > 0 ? tuitionAgg.paid : Math.max(0, paid - regPaidAmt);
-  const scoRemaining  = tuitionAgg.list.length > 0 ? tuitionAgg.balance : Math.max(0, remaining - regRemaining);
-  const scoPct        = scoTotal > 0 ? Math.min(100, Math.round((scoPaidAmt / scoTotal) * 100)) : 0;
+  const scoTotal     = tuitionAgg.list.length > 0 ? tuitionAgg.total : tuition;
+  const scoPaidAmt   = tuitionAgg.list.length > 0 ? tuitionAgg.paid : paid;
+  const scoRemaining = tuitionAgg.list.length > 0 ? tuitionAgg.balance : remaining;
+  const scoPct       = scoTotal > 0 ? Math.min(100, Math.round((scoPaidAmt / scoTotal) * 100)) : 0;
 
   const activeEnrollment =
     enrollments.find((e) => e.is_active || e.status === 'ACTIVE' || e.status === 'ENROLLED') ||
@@ -254,49 +243,38 @@ export default function StudentDashboardScreen({ navigation }) {
             </View>
 
             {/* Fees breakdown — same layout/figures as the Finance screen header */}
-            {(regTotal > 0 || scoTotal > 0) && (
+            {scoTotal > 0 && (
               <View style={styles.feesGrid}>
-                {regTotal > 0 && (
-                  <View style={styles.feesSection}>
-                    <Text style={styles.feesSectionTitle}>INSCRIPTION</Text>
-                    <View style={styles.feesCols}>
-                      <FinStat label="TOTAL" value={fmtN(regTotal)} />
-                      <FinStat label="PAYÉ" value={fmtN(regPaidAmt)} paid={regPaidAmt > 0} />
-                      <FinStat label="RESTE" value={fmtN(regRemaining)} danger={regRemaining > 0} />
-                    </View>
+                <View style={styles.feesSection}>
+                  <Text style={styles.feesSectionTitle}>SCOLARITÉ</Text>
+                  <View style={styles.feesCols}>
+                    <FinStat label="TOTAL" value={fmtN(scoTotal)} />
+                    <FinStat label="PAYÉ" value={fmtN(scoPaidAmt)} paid={scoPaidAmt > 0} />
+                    <FinStat label="RESTE" value={fmtN(scoRemaining)} danger={scoRemaining > 0} />
                   </View>
-                )}
-                {scoTotal > 0 && (
-                  <View style={styles.feesSection}>
-                    <Text style={styles.feesSectionTitle}>SCOLARITÉ</Text>
-                    <View style={styles.feesCols}>
-                      <FinStat label="TOTAL" value={fmtN(scoTotal)} />
-                      <FinStat label="PAYÉ" value={fmtN(scoPaidAmt)} paid={scoPaidAmt > 0} />
-                      <FinStat label="RESTE" value={fmtN(scoRemaining)} danger={scoRemaining > 0} />
-                    </View>
-                  </View>
-                )}
+                </View>
               </View>
             )}
           </SafeAreaView>
         </LinearGradient>
 
         {/* ── Inscription status ─────────────────────────────── */}
-        {(tuition > 0 || regTotal > 0) && (
+        {tuition > 0 && (
           <View style={styles.section}>
-            <View style={[styles.inscriptionCard, regRemaining <= 0
+            <View style={[styles.inscriptionCard, isEnrolled
               ? { backgroundColor: '#F0FDF4', borderColor: '#BBF7D0' }
               : { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }]}>
-              <View style={[styles.inscriptionIcon, { backgroundColor: regRemaining <= 0 ? colors.success : colors.warning }]}>
-                <Ionicons name={regRemaining <= 0 ? 'checkmark-circle' : 'alert-circle'} size={18} color="#fff" />
+              <View style={[styles.inscriptionIcon, { backgroundColor: isEnrolled ? colors.success : colors.warning }]}>
+                <Ionicons name={isEnrolled ? 'checkmark-circle' : 'alert-circle'} size={18} color="#fff" />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.inscriptionTitle, { color: regRemaining <= 0 ? '#065F46' : '#92400E' }]}>
-                  {regRemaining <= 0 ? 'Inscription validée' : 'Inscription non validée'}
+                <Text style={[styles.inscriptionTitle, { color: isEnrolled ? '#065F46' : '#92400E' }]}>
+                  {isEnrolled ? 'Inscrit ✓' : 'Non inscrit'}
                 </Text>
-                {regTotal > 0 && (
-                  <Text style={[styles.inscriptionSub, { color: regRemaining <= 0 ? '#047857' : '#B45309' }]}>
-                    Frais d'inscription : {regTotal.toLocaleString('fr-FR')} F
+                {!isEnrolled && (
+                  <Text style={[styles.inscriptionSub, { color: '#B45309' }]}>
+                    Reste {(enrollmentGap ?? 0).toLocaleString('fr-FR')} F
+                    {minEnrollmentPayment != null ? ` (minimum ${minEnrollmentPayment.toLocaleString('fr-FR')} F)` : ''}
                   </Text>
                 )}
               </View>
@@ -327,7 +305,7 @@ export default function StudentDashboardScreen({ navigation }) {
         )}
 
         {/* ── Financial summary ──────────────────────────────── */}
-        {(scoTotal > 0 || regTotal > 0) && (
+        {scoTotal > 0 && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionLabel}>Situation financière</Text>
@@ -336,57 +314,35 @@ export default function StudentDashboardScreen({ navigation }) {
               </TouchableOpacity>
             </View>
 
-            {regTotal > 0 && (
-              <View style={[styles.card, { marginBottom: spacing.sm }]}>
-                <Text style={styles.finBlockTitle}>Frais d'inscription</Text>
-                <View style={styles.finRow}>
-                  <Text style={styles.finLabel}>Total</Text>
-                  <Text style={styles.finValue}>{regTotal.toLocaleString('fr-FR')} F</Text>
-                </View>
-                <View style={styles.finRow}>
-                  <Text style={styles.finLabel}>Montant payé</Text>
-                  <Text style={[styles.finValue, { color: colors.success }]}>{regPaidAmt.toLocaleString('fr-FR')} F</Text>
-                </View>
-                <View style={styles.progressBar}>
-                  <View style={[styles.progressFill, {
-                    width: `${regTotal > 0 ? Math.min(100, Math.round((regPaidAmt / regTotal) * 100)) : 0}%`,
-                    backgroundColor: regRemaining <= 0 ? colors.success : colors.warning,
-                  }]} />
-                </View>
-                <View style={styles.finRow}>
-                  <Text style={styles.finLabel}>{regRemaining > 0 ? 'Reste à payer' : 'Solde'}</Text>
-                  <Text style={[styles.finValue, { color: regRemaining > 0 ? colors.danger : colors.success }]}>
-                    {regRemaining > 0 ? `${regRemaining.toLocaleString('fr-FR')} F` : 'Soldé ✓'}
-                  </Text>
-                </View>
+            <View style={styles.card}>
+              <Text style={styles.finBlockTitle}>Frais de scolarité</Text>
+              <View style={styles.finRow}>
+                <Text style={styles.finLabel}>Total</Text>
+                <Text style={styles.finValue}>{scoTotal.toLocaleString('fr-FR')} F</Text>
               </View>
-            )}
-
-            {scoTotal > 0 && (
-              <View style={styles.card}>
-                <Text style={styles.finBlockTitle}>Frais de scolarité</Text>
-                <View style={styles.finRow}>
-                  <Text style={styles.finLabel}>Total</Text>
-                  <Text style={styles.finValue}>{scoTotal.toLocaleString('fr-FR')} F</Text>
-                </View>
-                <View style={styles.finRow}>
-                  <Text style={styles.finLabel}>Montant payé</Text>
-                  <Text style={[styles.finValue, { color: colors.success }]}>{scoPaidAmt.toLocaleString('fr-FR')} F</Text>
-                </View>
-                <View style={styles.progressBar}>
-                  <View style={[styles.progressFill, {
-                    width: `${scoPct}%`,
-                    backgroundColor: scoPct === 100 ? colors.success : scoPct >= 50 ? colors.warning : colors.danger,
-                  }]} />
-                </View>
-                <View style={styles.finRow}>
-                  <Text style={styles.finLabel}>{scoRemaining > 0 ? 'Reste à payer' : 'Solde'}</Text>
-                  <Text style={[styles.finValue, { color: scoRemaining > 0 ? colors.danger : colors.success }]}>
-                    {scoRemaining > 0 ? `${scoRemaining.toLocaleString('fr-FR')} F` : 'Soldé ✓'}
-                  </Text>
-                </View>
+              <View style={styles.finRow}>
+                <Text style={styles.finLabel}>Montant payé</Text>
+                <Text style={[styles.finValue, { color: colors.success }]}>{scoPaidAmt.toLocaleString('fr-FR')} F</Text>
               </View>
-            )}
+              <View style={styles.progressBar}>
+                <View style={[styles.progressFill, {
+                  width: `${scoPct}%`,
+                  backgroundColor: scoPct === 100 ? colors.success : scoPct >= 50 ? colors.warning : colors.danger,
+                }]} />
+              </View>
+              <View style={styles.finRow}>
+                <Text style={styles.finLabel}>{scoRemaining > 0 ? 'Reste à payer' : 'Solde'}</Text>
+                <Text style={[styles.finValue, { color: scoRemaining > 0 ? colors.danger : colors.success }]}>
+                  {scoRemaining > 0 ? `${scoRemaining.toLocaleString('fr-FR')} F` : 'Soldé ✓'}
+                </Text>
+              </View>
+              <View style={[styles.finRow, { marginTop: 4, paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.divider }]}>
+                <Text style={styles.finLabel}>Statut inscription</Text>
+                <Text style={[styles.finValue, { color: isEnrolled ? colors.success : colors.warning }]}>
+                  {isEnrolled ? 'Inscrit ✓' : `Non inscrit — reste ${(enrollmentGap ?? 0).toLocaleString('fr-FR')} F`}
+                </Text>
+              </View>
+            </View>
           </View>
         )}
 

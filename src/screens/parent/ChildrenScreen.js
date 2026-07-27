@@ -128,13 +128,11 @@ export default function ParentChildrenScreen({ navigation, route }) {
             ? {
                 ...prev,
                 _tuition: s.tuition_fee,
-                _tuition_only: s.tuition_fee_only,
                 _paid: s.total_paid,
                 _remaining: s.remaining_balance,
-                _registration_fee: s.registration_fee,
                 _configured_tuition: s.configured_tuition_fee,
-                _configured_reg: s.configured_registration_fee,
-                registration_fee_paid: s.registration_fee_paid,
+                _min_enrollment_payment: s.min_enrollment_payment,
+                is_enrolled: s.is_enrolled,
                 has_payment_schedule: s.has_payment_schedule,
                 tuition_up_to_date: s.tuition_up_to_date,
                 echeance_override: s.echeance_override,
@@ -197,13 +195,11 @@ export default function ParentChildrenScreen({ navigation, route }) {
         return s ? {
           ...child,
           _tuition: s.tuition_fee,
-          _tuition_only: s.tuition_fee_only,
           _paid: s.total_paid,
           _remaining: s.remaining_balance,
-          _registration_fee: s.registration_fee,
           _configured_tuition: s.configured_tuition_fee,
-          _configured_reg: s.configured_registration_fee,
-          registration_fee_paid: s.registration_fee_paid,
+          _min_enrollment_payment: s.min_enrollment_payment,
+          is_enrolled: s.is_enrolled,
           has_payment_schedule: s.has_payment_schedule,
           tuition_up_to_date: s.tuition_up_to_date,
           echeance_override: s.echeance_override,
@@ -267,11 +263,13 @@ export default function ParentChildrenScreen({ navigation, route }) {
 
       // Financial
       const cfgTuition = parseFloat(selected._configured_tuition ?? 0);
-      const cfgReg     = parseFloat(selected._configured_reg ?? 0);
       const allPaid    = parseFloat(selected._paid ?? 0);
-      const scoPaid    = selected.registration_fee_paid && cfgReg > 0 ? Math.max(0, allPaid - cfgReg) : allPaid;
+      const scoPaid    = allPaid;
       const scoRem     = Math.max(0, cfgTuition - scoPaid);
       const scoPct     = cfgTuition > 0 ? Math.min(100, Math.round((scoPaid / cfgTuition) * 100)) : 0;
+      const isEnrolledPdf = !!selected.is_enrolled;
+      const minEnrollPdf  = parseFloat(selected._min_enrollment_payment ?? 0);
+      const enrollGapPdf  = Math.max(0, minEnrollPdf - allPaid);
       const fmtF = (n) => n.toLocaleString('fr-FR') + ' F';
 
       // Absences
@@ -397,7 +395,7 @@ export default function ParentChildrenScreen({ navigation, route }) {
         <div class="student-name">${name}</div>
         <div class="student-mat">#${mat}</div>
         <div class="student-badges">
-          <span class="badge badge-green">${selected.registration_fee_paid ? 'Inscrit ✓' : 'Non inscrit'}</span>
+          <span class="badge badge-green">${isEnrolledPdf ? 'Inscrit ✓' : 'Non inscrit'}</span>
           ${selected.status === 'ACTIVE' ? '<span class="badge badge-blue">Actif</span>' : ''}
         </div>
       </div>
@@ -430,7 +428,7 @@ export default function ParentChildrenScreen({ navigation, route }) {
       <div class="info-cell"><div class="info-label">Classe</div><div class="info-value">${cls}</div></div>
       <div class="info-cell"><div class="info-label">Site</div><div class="info-value">${site}</div></div>
       <div class="info-cell"><div class="info-label">Année académique</div><div class="info-value">${acYear}</div></div>
-      <div class="info-cell"><div class="info-label">Statut</div><div class="info-value">${selected.registration_fee_paid ? '✅ Inscrit' : '⚠️ Non inscrit'}</div></div>
+      <div class="info-cell"><div class="info-label">Statut</div><div class="info-value">${isEnrolledPdf ? '✅ Inscrit' : '⚠️ Non inscrit'}</div></div>
     </div>
   </div>
 
@@ -438,12 +436,12 @@ export default function ParentChildrenScreen({ navigation, route }) {
   <div class="section">
     <div class="section-title">Situation financière</div>
     <div class="finance-grid">
-      <div class="finance-card" style="border-left:4px solid ${selected.registration_fee_paid ? '#059669' : '#D97706'}">
-        <div class="finance-card-title">Frais d'inscription</div>
-        <div class="progress-bar"><div class="progress-fill" style="width:${selected.registration_fee_paid ? 100 : 0}%;background:${selected.registration_fee_paid ? '#059669' : '#D97706'}"></div></div>
+      <div class="finance-card" style="border-left:4px solid ${isEnrolledPdf ? '#059669' : '#D97706'}">
+        <div class="finance-card-title">Statut inscription</div>
+        <div class="progress-bar"><div class="progress-fill" style="width:${isEnrolledPdf ? 100 : 0}%;background:${isEnrolledPdf ? '#059669' : '#D97706'}"></div></div>
         <div class="finance-row">
-          <span>${fmtF(cfgReg)} total</span>
-          <strong style="color:${selected.registration_fee_paid ? '#059669' : '#D97706'}">${selected.registration_fee_paid ? 'Soldé ✓' : 'En attente'}</strong>
+          <span>${isEnrolledPdf ? '' : `Reste ${fmtF(enrollGapPdf)}`}</span>
+          <strong style="color:${isEnrolledPdf ? '#059669' : '#D97706'}">${isEnrolledPdf ? 'Inscrit ✓' : 'Non inscrit'}</strong>
         </div>
       </div>
       <div class="finance-card" style="border-left:4px solid #2563EB">
@@ -561,14 +559,16 @@ export default function ParentChildrenScreen({ navigation, route }) {
   }, [selected, absences, grades, invoices]);
 
   // ── Derived data ──────────────────────────────────────────────────────────
-  const isEnrolled  = !!selected?.registration_fee_paid;
-  const configReg   = parseFloat(selected?._configured_reg ?? 0);
+  const isEnrolled  = !!selected?.is_enrolled;
   const totalPaid   = parseFloat(selected?._paid ?? selected?.total_paid ?? 0);
   // Header KPIs: show scolarité stats (consistent with list card)
   const tuition   = parseFloat(selected?._configured_tuition ?? 0);
-  const paid      = isEnrolled && configReg > 0 ? Math.max(0, totalPaid - configReg) : totalPaid;
+  const paid      = totalPaid;
   const remaining = Math.max(0, tuition - paid);
   const pct = tuition > 0 ? Math.min(100, Math.round((paid / tuition) * 100)) : 0;
+  const minEnrollmentPayment = selected?._min_enrollment_payment != null
+    ? parseFloat(selected._min_enrollment_payment) : null;
+  const enrollmentGap = minEnrollmentPayment != null ? Math.max(0, minEnrollmentPayment - totalPaid) : null;
 
   const fullName = selected
     ? `${selected.user?.first_name || selected.first_name || ''} ${selected.user?.last_name || selected.last_name || ''}`.trim()
@@ -776,7 +776,7 @@ export default function ParentChildrenScreen({ navigation, route }) {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.success} />}
           showsVerticalScrollIndicator={false}
         >
-          {tab === 'resume'        && <TabResume selected={selected} tuition={tuition} paid={paid} remaining={remaining} pct={pct} isEnrolled={isEnrolled} invoices={invoices} />}
+          {tab === 'resume'        && <TabResume selected={selected} tuition={tuition} paid={paid} remaining={remaining} pct={pct} isEnrolled={isEnrolled} invoices={invoices} enrollmentGap={enrollmentGap} minEnrollmentPayment={minEnrollmentPayment} />}
           {tab === 'paiements'     && <TabPaiements invoices={invoices} />}
           {tab === 'absences'      && <TabAbsences absences={absences} justified={justified} unjustified={unjustified} />}
           {tab === 'notes'         && <TabNotes subjectGroups={subjectGroups} />}
@@ -798,12 +798,10 @@ function ChildCard({ child, onPress }) {
     'Enfant';
   const initials = name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 
-  const paid           = parseFloat(child._paid ?? child.total_paid ?? 0);
-  const isEnrolled     = !!child.registration_fee_paid;
-  const regFee         = parseFloat(child._configured_reg ?? child._registration_fee ?? 0);
-  const configTuition  = parseFloat(child._configured_tuition ?? 0);
-  // Tuition paid = total paid minus registration fee (if enrolled)
-  const tuitionPaidCard = isEnrolled && regFee > 0 ? Math.max(0, paid - regFee) : 0;
+  const paid            = parseFloat(child._paid ?? child.total_paid ?? 0);
+  const isEnrolled      = !!child.is_enrolled;
+  const configTuition   = parseFloat(child._configured_tuition ?? 0);
+  const tuitionPaidCard = paid;
   const tuitionRemCard  = Math.max(0, configTuition - tuitionPaidCard);
   const tuitionPctCard  = configTuition > 0 ? Math.min(100, Math.round((tuitionPaidCard / configTuition) * 100)) : 0;
 
@@ -907,48 +905,18 @@ function ChildCard({ child, onPress }) {
 
 // ── Résumé ────────────────────────────────────────────────────────────────────
 
-function TabResume({ selected, isEnrolled, invoices }) {
-  const invList = invoices || [];
+function TabResume({ selected, isEnrolled, invoices, enrollmentGap, minEnrollmentPayment }) {
+  const invList = (invoices || []).filter((inv) => inv.status !== 'CANCELLED');
 
-  // Classify invoices between registration and tuition
-  const regInvoices = invList.filter(inv => {
-    const t = `${inv.notes || ''} ${inv.description || ''}`.toLowerCase();
-    if (t.includes('inscription')) return true;
-    return (inv.items || []).some(it => {
-      const s = `${it.description||''} ${it.fee_type_name||''} ${it.fee_type_code||''}`.toLowerCase();
-      return s.includes('inscription') || s.includes('registration');
-    });
-  });
-  const tuitionInvoices = invList.filter(inv => {
-    const t = `${inv.notes || ''} ${inv.description || ''}`.toLowerCase();
-    if (t.includes('scolarité') || t.includes('scolarite') || t.includes('tuition')) return true;
-    return (inv.items || []).some(it => {
-      const s = `${it.description||''} ${it.fee_type_name||''} ${it.fee_type_code||''}`.toLowerCase();
-      return s.includes('tuition') || s.includes('scolarit');
-    });
-  });
-
-  // Registration amounts
-  const regConfigured   = parseFloat(selected?._configured_reg ?? selected?._registration_fee ?? 0);
-  const regTotal        = regInvoices.length > 0
-    ? regInvoices.reduce((s, inv) => s + parseFloat(inv.total || 0), 0)
-    : regConfigured;
-  const regPaid         = regInvoices.reduce((s, inv) => s + parseFloat(inv.amount_paid || 0), 0);
-  const regDisplayPaid  = (isEnrolled && regPaid === 0 && regTotal > 0) ? regTotal : regPaid;
-  const regBalance      = Math.max(0, regTotal - regDisplayPaid);
-  const regPct          = regTotal > 0 ? Math.min(100, Math.round((regDisplayPaid / regTotal) * 100)) : (isEnrolled ? 100 : 0);
-
-  // Tuition amounts — use configured amount (same as list card, not effective/invoiced amount)
+  // Tuition amounts — aggregated from real invoices when available, falling
+  // back to the configured amount (same as the list card).
   const tuitionConfigured = parseFloat(selected?._configured_tuition ?? 0);
-  const tuitionTotal      = tuitionInvoices.length > 0
-    ? tuitionInvoices.reduce((s, inv) => s + parseFloat(inv.total || 0), 0)
+  const tuitionTotal      = invList.length > 0
+    ? invList.reduce((s, inv) => s + parseFloat(inv.total || 0), 0)
     : tuitionConfigured;
-  const tuitionPaidInvoices = tuitionInvoices.reduce((s, inv) => s + parseFloat(inv.amount_paid || 0), 0);
+  const tuitionPaidInvoices = invList.reduce((s, inv) => s + parseFloat(inv.amount_paid || 0), 0);
   const totalAllPaid      = parseFloat(selected?._paid ?? 0);
-  // When invoice classification fails, derive tuition paid = total_paid − registration_paid
-  const tuitionPaidAmt    = tuitionInvoices.length > 0
-    ? tuitionPaidInvoices
-    : Math.max(0, totalAllPaid - regDisplayPaid);
+  const tuitionPaidAmt    = invList.length > 0 ? tuitionPaidInvoices : totalAllPaid;
   const tuitionBalance    = Math.max(0, tuitionTotal - tuitionPaidAmt);
   const tuitionPct        = tuitionTotal > 0 ? Math.min(100, Math.round((tuitionPaidAmt / tuitionTotal) * 100)) : 0;
 
@@ -961,12 +929,14 @@ function TabResume({ selected, isEnrolled, invoices }) {
         </View>
         <View style={{ flex: 1 }}>
           <Text style={[styles.enrollTitle, { color: isEnrolled ? '#065F46' : '#92400E' }]}>
-            {isEnrolled ? 'Inscription validée' : 'Non inscrit — frais en attente'}
+            {isEnrolled ? 'Inscription validée' : 'Non inscrit'}
           </Text>
           <Text style={[styles.enrollSub, { color: isEnrolled ? '#047857' : '#B45309' }]}>
             {isEnrolled
               ? 'Votre enfant est inscrit et suit les cours.'
-              : "Les frais d'inscription doivent être réglés."}
+              : `Reste ${(enrollmentGap ?? 0).toLocaleString('fr-FR')} F${
+                  minEnrollmentPayment != null ? ` (minimum ${minEnrollmentPayment.toLocaleString('fr-FR')} F)` : ''
+                } pour valider l'inscription.`}
           </Text>
         </View>
       </View>
@@ -999,39 +969,6 @@ function TabResume({ selected, isEnrolled, invoices }) {
           </View>
         </View>
       )}
-
-      {/* Frais d'inscription */}
-      <View style={[styles.card, { borderLeftWidth: 3, borderLeftColor: isEnrolled ? '#059669' : '#D97706' }]}>
-        <View style={[styles.cardRow, { marginBottom: 10 }]}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <View style={[styles.kpiCardIcon, { backgroundColor: '#FEF3C7', width: 32, height: 32 }]}>
-              <Ionicons name="ribbon-outline" size={15} color="#D97706" />
-            </View>
-            <Text style={[styles.cardTitle, { color: '#92400E' }]}>{"Frais d'inscription"}</Text>
-          </View>
-          <View style={[styles.statusBadge, { backgroundColor: isEnrolled ? '#D1FAE5' : '#FEF3C7' }]}>
-            <Text style={[styles.statusBadgeText, { color: isEnrolled ? '#059669' : '#D97706' }]}>
-              {isEnrolled ? 'Payé ✓' : regBalance > 0 ? 'En attente' : 'À régler'}
-            </Text>
-          </View>
-        </View>
-        {regTotal > 0 && (
-          <>
-            <View style={styles.progressBar}>
-              <View style={[styles.progressFill, {
-                width: `${regPct}%`,
-                backgroundColor: isEnrolled ? '#059669' : '#D97706',
-              }]} />
-            </View>
-            <View style={[styles.cardRow, { marginTop: 6 }]}>
-              <Text style={styles.cardSub}>{regDisplayPaid.toLocaleString('fr-FR')} F payé</Text>
-              <Text style={[styles.cardSub, { fontWeight: '700', color: regBalance > 0 ? '#EF4444' : '#059669' }]}>
-                {regBalance > 0 ? `Reste ${regBalance.toLocaleString('fr-FR')} F` : `${regTotal.toLocaleString('fr-FR')} F — Soldé`}
-              </Text>
-            </View>
-          </>
-        )}
-      </View>
 
       {/* Frais de scolarité */}
       <View style={[styles.card, { borderLeftWidth: 3, borderLeftColor: '#2563EB' }]}>
@@ -1066,6 +1003,12 @@ function TabResume({ selected, isEnrolled, invoices }) {
         ) : (
           <Text style={styles.cardSub}>Aucune facture de scolarité créée</Text>
         )}
+        <View style={[styles.cardRow, { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.divider }]}>
+          <Text style={styles.cardSub}>Statut inscription</Text>
+          <Text style={[styles.cardSub, { fontWeight: '700', color: isEnrolled ? '#059669' : '#D97706' }]}>
+            {isEnrolled ? 'Inscrit ✓' : `Non inscrit — reste ${(enrollmentGap ?? 0).toLocaleString('fr-FR')} F`}
+          </Text>
+        </View>
       </View>
 
       {/* Academic info grid */}
@@ -1093,17 +1036,6 @@ function TabResume({ selected, isEnrolled, invoices }) {
 
 // ── Paiements ────────────────────────────────────────────────────────────────
 
-function getInvoiceTypeLabel(inv) {
-  const text = `${inv.notes || ''} ${inv.description || ''}`.toLowerCase();
-  if (text.includes('inscription')) return "Frais d'inscription";
-  if (text.includes('scolarité') || text.includes('scolarite') || text.includes('tuition')) return 'Frais de scolarité';
-  const itemMatch = (inv.items || []).some(it => {
-    const s = `${it.description||''} ${it.fee_type_name||''} ${it.fee_type_code||''}`.toLowerCase();
-    return s.includes('inscription') || s.includes('registration');
-  });
-  return itemMatch ? "Frais d'inscription" : 'Frais de scolarité';
-}
-
 function TabPaiements({ invoices }) {
   if (invoices.length === 0) {
     return <EmptyState icon="wallet-outline" title="Aucune facture" subtitle="Les factures apparaîtront ici" />;
@@ -1116,17 +1048,15 @@ function TabPaiements({ invoices }) {
         const amtPaid = parseFloat(inv.amount_paid || 0);
         const rest = total - amtPaid;
         const p = total > 0 ? Math.min(100, Math.round((amtPaid / total) * 100)) : 0;
-        const typeLabel = getInvoiceTypeLabel(inv);
-        const isReg = typeLabel.includes('inscription');
         return (
-          <View key={inv.id} style={[styles.invoiceCard, { borderLeftWidth: 3, borderLeftColor: isReg ? '#D97706' : '#2563EB' }]}>
+          <View key={inv.id} style={[styles.invoiceCard, { borderLeftWidth: 3, borderLeftColor: '#2563EB' }]}>
             <View style={styles.invoiceTop}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.invoiceTitle} numberOfLines={1}>
                   {inv.invoice_number || `Facture #${String(inv.id).slice(0, 8)}`}
                 </Text>
-                <Text style={[styles.invoiceSub, { color: isReg ? '#92400E' : '#1E40AF', fontWeight: '600' }]} numberOfLines={1}>
-                  {typeLabel}
+                <Text style={[styles.invoiceSub, { color: '#1E40AF', fontWeight: '600' }]} numberOfLines={1}>
+                  Frais de scolarité
                   {inv.due_date ? ` · Échéance: ${new Date(inv.due_date).toLocaleDateString('fr-FR')}` : ''}
                 </Text>
               </View>
