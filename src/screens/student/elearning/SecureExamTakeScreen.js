@@ -8,51 +8,25 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ScreenCapture from 'expo-screen-capture';
+import { WebView } from 'react-native-webview';
 import { elearningService } from '../../../services/elearning';
 import { setExamInProgress } from '../../../hooks/usePushNotifications';
 import QuestionRenderer, { isAnswered } from '../../../components/quiz/QuestionRenderer';
-import PdfViewerModal from '../../../components/exam/PdfViewerModal';
 import { colors, spacing, radius } from '../../../theme/colors';
 
-// Cumulative-hit threshold per detection category before escalating to a hard
-// suspend — mirrors FRAUD_HIT_THRESHOLD on the web (occurrences anywhere
-// across the exam, not necessarily consecutive).
-const FRAUD_HIT_THRESHOLD = 3;
-// "No face" gets a more tolerant threshold than phone/multi-face: a phone
-// resting flat on a table (very normal on mobile — there's no separate
-// keyboard, so students look down at the phone itself to type) points the
-// front camera at the ceiling and can legitimately miss the face for several
-// ticks in a row with nothing suspicious going on. Phone/multi-face
-// detections have no such natural mobile-specific false-positive source, so
-// they keep the same threshold as the web.
-const NO_FACE_THRESHOLD = 5;
-// French labels for the backend's gaze_direction enum (see
-// analyze_exam_snapshot on the backend), shown in the flag banner.
-const GAZE_LABELS = { haut: 'vers le haut', bas: 'vers le bas', gauche: 'à gauche', droite: 'à droite', derriere: 'vers l\'arrière' };
-// How often a webcam frame is captured and sent to the backend's AI analysis
-// (analyze_exam_snapshot) while the exam is active. The web does this
-// on-device every 3s for free; here each tick is a real upload + Gemini call,
-// so a slightly longer cadence keeps bandwidth/cost reasonable.
+// How often a webcam frame is captured and archived server-side while the
+// exam is active — purely for the teacher's own review, no automatic
+// consequence attached to it anymore (no phone/face/gaze detection reacted
+// to on the client).
 const DETECT_INTERVAL = 5000;
 // Ceiling for the adaptive backoff below — if the AI backend keeps signaling
 // it's overloaded (ai_available: false), captures space out up to this much
-// instead of retrying every 5s into a saturated quota. Still frequent enough
-// to catch sustained bad behavior, just not wasteful under load.
+// instead of retrying every 5s into a saturated quota.
 const MAX_DETECT_INTERVAL = 20000;
-const FLAG_BANNER_MS = 8000;
-// Looking-away escalation is duration-based, not count-based like the other
-// categories above — see the design note in ExamPage.jsx (web) for the same
-// constants. A continuous away-streak only counts as an "incident" once it
-// exceeds 30s; two independent running totals are tracked for the whole
-// exam (incident count, cumulated away-time) and escalation to
-// handleFraudBlock fires the moment EITHER crosses its own threshold,
-// whichever comes first — not a single "tolerate N then check the sum"
-// gate, which is mathematically guaranteed to trip on its own once N
-// incidents of >GAZE_STRIKE_MIN_MS each are reached, making the cumulative
-// check meaningless if its threshold is below N × GAZE_STRIKE_MIN_MS.
-const GAZE_STRIKE_MIN_MS       = 30_000;
-const GAZE_TOLERATED_INCIDENTS = 5;
-const GAZE_CUM_SUSPEND_MS      = 5 * 60 * 1000;
+// Flat suspension duration for the only two anti-cheat triggers left:
+// leaving the app (tab/window-switch equivalent) or a screenshot attempt
+// (copy/paste equivalent). Never escalates, never auto-submits the exam.
+const FRAUD_SUSPEND_MIN = 5;
 
 function formatTime(secs) {
   const m = Math.floor(secs / 60);
@@ -60,12 +34,13 @@ function formatTime(secs) {
   return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
-// First offense: a sustained suspicious signal (webcam AI or leaving the app)
-// suspends the exam behind this blocking overlay for 5 minutes instead of
-// ending it outright — ports FraudSuspensionModal from ExamPage.jsx exactly
-// (same copy, same countdown behavior, same "5 minutes are deducted up
-// front, timer stays paused during the block" contract).
-function FraudSuspensionModal({ reason, until, stage, onExpire }) {
+// A tab/window switch (leaving the app) or a screenshot attempt suspends the
+// exam behind this blocking overlay for a flat FRAUD_SUSPEND_MIN minutes —
+// never escalates, never ends the exam: the student just waits it out and
+// resumes exactly where they were. Mirrors ExamPage.jsx (web) exactly (same
+// copy, same countdown behavior, same "minutes deducted up front, timer
+// stays paused during the block" contract).
+function FraudSuspensionModal({ reason, until, onExpire }) {
   const [remaining, setRemaining] = useState(0);
 
   useEffect(() => {
@@ -81,7 +56,6 @@ function FraudSuspensionModal({ reason, until, stage, onExpire }) {
 
   const mm = String(Math.floor(remaining / 60)).padStart(2, '0');
   const ss = String(remaining % 60).padStart(2, '0');
-  const minutes = stage === 2 ? 10 : 5;
 
   return (
     <Modal visible transparent animationType="fade" statusBarTranslucent>
@@ -90,58 +64,13 @@ function FraudSuspensionModal({ reason, until, stage, onExpire }) {
           <View style={styles.suspendIconWrap}>
             <Ionicons name="shield-outline" size={40} color={colors.danger} />
           </View>
-          <Text style={styles.suspendTitle}>
-            Examen suspendu — comportement suspect détecté{stage === 2 ? ' (récidive)' : ''}
-          </Text>
+          <Text style={styles.suspendTitle}>Examen suspendu</Text>
           <Text style={styles.suspendReason}>{reason}</Text>
           <Text style={styles.suspendTimer}>{mm}:{ss}</Text>
           <Text style={styles.suspendNote}>
-            La caméra continue de vous surveiller pendant cette suspension. L'examen reprendra automatiquement à la
-            fin du compte à rebours. Ces {minutes} minutes sont déduites de votre temps d'examen — le chronomètre
-            est pour l'instant en pause et reprendra là où il en était.
-            {stage === 2
-              ? ' En cas de nouveau comportement suspect pendant cette suspension, votre examen sera immédiatement terminé et vos réponses soumises pour correction.'
-              : ' Si un comportement suspect est de nouveau détecté pendant cette suspension, une suspension plus longue (10 minutes) s\'appliquera à la reprise.'}
+            L'examen reprendra automatiquement à la fin du compte à rebours. Ces {FRAUD_SUSPEND_MIN} minutes sont
+            déduites de votre temps d'examen — le chronomètre est pour l'instant en pause et reprendra là où il en était.
           </Text>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
-// Shown right when a suspension (5 or 10 min) expires AND the camera caught
-// further suspicious behavior *during* that suspension (see onFrame's
-// suspended-but-still-watching branch) — requires an explicit
-// acknowledgment before applying the consequence (a longer suspension, or
-// closing the exam) so the student can't miss what was recorded.
-function SuspensionReviewModal({ summary, outcome, onAcknowledge }) {
-  return (
-    <Modal visible transparent animationType="fade" statusBarTranslucent>
-      <View style={styles.suspendOverlay}>
-        <View style={styles.suspendCard}>
-          <View style={styles.suspendIconWrap}>
-            <Ionicons name="shield-outline" size={40} color={colors.danger} />
-          </View>
-          <Text style={styles.suspendTitle}>Comportements suspects détectés pendant la suspension</Text>
-          <Text style={[styles.suspendReason, { marginBottom: 4 }]}>
-            Voici ce que la caméra a observé pendant que votre examen était suspendu :
-          </Text>
-          <View style={styles.reviewList}>
-            {summary.map((s, i) => (
-              <View key={i} style={styles.reviewItem}>
-                <View style={styles.reviewDot} />
-                <Text style={styles.reviewItemText}>{s}</Text>
-              </View>
-            ))}
-          </View>
-          <Text style={styles.reviewOutcome}>
-            {outcome === 'lock'
-              ? 'Votre examen est immédiatement terminé et vos réponses sont soumises pour correction.'
-              : 'Votre examen est suspendu pour 10 minutes supplémentaires.'}
-          </Text>
-          <TouchableOpacity style={styles.reviewAckBtn} onPress={onAcknowledge}>
-            <Text style={styles.reviewAckBtnText}>J'ai compris</Text>
-          </TouchableOpacity>
         </View>
       </View>
     </Modal>
@@ -149,12 +78,12 @@ function SuspensionReviewModal({ summary, outcome, onAcknowledge }) {
 }
 
 // Small always-on live camera preview shown in a corner during the exam,
-// with a status dot (green = face OK, red pulsing-ish = no face) — mirrors
-// the web's little webcam thumbnail. Captures a frame every DETECT_INTERVAL
-// and hands it to onFrame(uri) for upload + AI analysis; capture failures
-// are reported once via onLost so the teacher sees monitoring was
+// archival only — mirrors the web's little webcam thumbnail. Captures a
+// frame every DETECT_INTERVAL and hands it to onFrame(uri) for upload
+// (purely for the teacher's own review, no automatic consequence); capture
+// failures are reported once via onLost so the teacher sees monitoring was
 // interrupted, without blocking the exam itself.
-function WebcamMonitor({ enabled, permission, onFrame, onLost, faceOk }) {
+function WebcamMonitor({ enabled, permission, onFrame, onLost }) {
   const [active, setActive] = useState(false);
   const camRef = useRef(null);
   const reportedLoss = useRef(false);
@@ -219,7 +148,7 @@ function WebcamMonitor({ enabled, permission, onFrame, onLost, faceOk }) {
   return (
     <View style={styles.webcamWrap}>
       <CameraView ref={camRef} style={StyleSheet.absoluteFill} facing="front" />
-      <View style={[styles.webcamDot, { backgroundColor: !active ? '#9CA3AF' : faceOk === false ? colors.danger : colors.success }]} />
+      <View style={[styles.webcamDot, { backgroundColor: active ? colors.success : '#9CA3AF' }]} />
     </View>
   );
 }
@@ -382,18 +311,11 @@ export default function SecureExamTakeScreen({ route, navigation }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
-  const [fraudBlock, setFraudBlock] = useState(null); // { reason, until, stage } | null
-  const [fraudLockMessage, setFraudLockMessage] = useState('');
-  // Set while resolving a just-expired suspension that caught further
-  // misbehavior (logging the event server-side, deciding the next stage) —
-  // keeps the exam timer/camera paused through that brief async gap.
-  const [escalating, setEscalating] = useState(false);
-  // { summary: string[], outcome: 'lock' | 'suspend10' } | null
-  const [suspensionReview, setSuspensionReview] = useState(null);
-  const [flagBanner, setFlagBanner] = useState(null);
-  const [faceOk, setFaceOk] = useState(null);
+  // Flat, single-stage suspension — a tab/app switch or a screenshot attempt
+  // suspends the exam for FRAUD_SUSPEND_MIN minutes, then resumes
+  // automatically. Never escalates and never ends the exam on its own.
+  const [fraudBlock, setFraudBlock] = useState(null); // { reason, until } | null
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
-  const [showPdf, setShowPdf] = useState(false);
   // "Répondre dans le système" for exams that carry a PDF subject — shown
   // alongside the quiz stepper when the exam also has a quiz, or in its
   // place when the exam is PDF-only. Submitted together with the quiz (if
@@ -408,41 +330,30 @@ export default function SecureExamTakeScreen({ route, navigation }) {
   const phaseRef = useRef(phase);
   const lastSwitchAt = useRef(0);
   const backgroundedAt = useRef(null);
-  const lastAiFlagAt = useRef({});
-  const flagBannerTimer = useRef(null);
-  const totals = useRef({ phone: 0, noFace: 0, multiFace: 0 });
-  // Gaze-away episode tracking (duration-based — see GAZE_* constants).
-  // gazeEpisode holds the timestamp the current continuous away-streak
-  // started, or null; gazeIncidentCount/gazeTotalMs are running totals
-  // across the whole exam attempt, fed by every qualifying (>30s) episode.
-  const gazeEpisode = useRef(null);
-  const gazeIncidentCount = useRef(0);
-  const gazeTotalMs = useRef(0);
   const lostReported = useRef(false);
   const autoRequestedCamera = useRef(false);
-  // Per-category tally of what the camera caught *during* the current
-  // suspension — reset at the start of each new suspension stage, read once
-  // at expiry to build the review. { [category]: { detail, count } }
-  const suspensionEvents = useRef({});
 
   useEffect(() => { fraudBlockRef.current = fraudBlock; }, [fraudBlock]);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
   // Native "copy-paste blocking" equivalent: prevents screenshots/screen
   // recording of the exam content on Android (FLAG_SECURE) for the whole
-  // time this screen is focused; iOS can't be blocked at the OS level but
-  // addScreenshotListener below at least reports an attempt.
+  // time this screen is focused, and suspends the exam on a detected
+  // attempt — same FRAUD_SUSPEND_MIN consequence as leaving the app. iOS
+  // can't be blocked at the OS level but addScreenshotListener below at
+  // least reports and suspends on the attempt.
   useEffect(() => {
     if (phase !== 'exam') return;
     ScreenCapture.preventScreenCaptureAsync('secure-exam').catch(() => {});
     const sub = ScreenCapture.addScreenshotListener(() => {
       elearningService.logExamEvent(examId, 'COPY_ATTEMPT', 'Capture d\'écran détectée pendant l\'examen.').catch(() => {});
+      handleFraudBlock('Une capture d\'écran a été détectée pendant l\'examen.');
     });
     return () => {
       ScreenCapture.allowScreenCaptureAsync('secure-exam').catch(() => {});
       sub.remove();
     };
-  }, [phase, examId]);
+  }, [phase, examId, handleFraudBlock]);
 
   // Tapping a push notification during the exam backgrounds+foregrounds the
   // app just like switching to another app does, which the AppState listener
@@ -454,12 +365,6 @@ export default function SecureExamTakeScreen({ route, navigation }) {
     setExamInProgress(phase === 'exam');
     return () => setExamInProgress(false);
   }, [phase]);
-
-  const showFlagBanner = (message) => {
-    setFlagBanner(message);
-    clearTimeout(flagBannerTimer.current);
-    flagBannerTimer.current = setTimeout(() => setFlagBanner(null), FLAG_BANNER_MS);
-  };
 
   // Submits the quiz attempt (if any) and/or the PDF "répondre dans le
   // système" section (if the exam carries a subject PDF), together as one
@@ -510,88 +415,23 @@ export default function SecureExamTakeScreen({ route, navigation }) {
     }
   }, [attempt, session, answers, questions, exam, pdfContent]);
 
-  // Sustained-fraud handler — shared by the app-switch detector and the
-  // webcam AI loop below. This is always the *first* trigger for a given
-  // suspension cycle: count 1 → 5-min suspension (stage 1), count 2 →
-  // 10-min suspension (stage 2 — only reachable here if a refresh lost the
-  // local suspensionReview state; the normal path to stage 2 is
-  // escalateFraud below), count 3+ → exam closed. The backend's own
-  // fraud_block_count is authoritative and survives a remount.
-  const handleFraudBlock = useCallback(async (reason) => {
+  // Suspension handler — shared by the app-switch detector and the
+  // screenshot listener above, the only two things left that suspend an
+  // exam. Always a flat FRAUD_SUSPEND_MIN minutes, logged server-side for
+  // the teacher's own review (fraud_block_count), but never escalates and
+  // never ends the exam on its own — the student just waits it out and
+  // resumes exactly where they were.
+  const handleFraudBlock = useCallback((reason) => {
     if (phaseRef.current !== 'exam' || fraudBlockRef.current) return;
-    let res = null;
-    try { res = await elearningService.logExamEvent(examId, 'FRAUD_BLOCK', reason); } catch {}
-    const count = res?.fraud_block_count ?? 1;
-    if (count >= 3) {
-      setFraudLockMessage(reason);
-      Alert.alert(
-        'Examen terminé',
-        `${reason}\n\nComportement suspect détecté à plusieurs reprises. Votre copie est verrouillée et transmise en l'état à votre enseignant.`,
-      );
-      handleSubmit(true);
-      return;
-    }
-    const stage = count >= 2 ? 2 : 1;
-    const durationMin = stage === 2 ? 10 : 5;
-    suspensionEvents.current = {};
-    setTimeLeft((t) => (t == null ? t : Math.max(0, t - durationMin * 60)));
-    setFraudBlock({ reason, until: Date.now() + durationMin * 60 * 1000, stage });
-  }, [examId, handleSubmit]);
-
-  // Called once per camera tick while a suspension is active (see onFrame's
-  // paused-but-still-watching branch) — tallies what's observed instead of
-  // acting on it immediately; the tally is only read once, when the
-  // suspension's countdown naturally expires (see handleSuspensionExpire).
-  const onSuspensionEvent = useCallback((category, detail) => {
-    const prev = suspensionEvents.current[category];
-    suspensionEvents.current[category] = { detail, count: (prev?.count || 0) + 1 };
-  }, []);
-
-  // A suspension just expired with events captured during it — log one more
-  // FRAUD_BLOCK server-side (bumping the authoritative count) and, based on
-  // what that count becomes, decide whether the student is about to see a
-  // longer (10-min) suspension or the exam closing outright. Either way the
-  // decision is shown via SuspensionReviewModal before it's actually applied.
-  const escalateFraud = useCallback(async (events) => {
-    const summary = events.map((e) => (e.count > 1 ? `${e.detail} (×${e.count})` : e.detail));
-    const reasonText = `Comportement suspect détecté pendant la suspension : ${summary.join(' · ')}`;
-    let res = null;
-    try { res = await elearningService.logExamEvent(examId, 'FRAUD_BLOCK', reasonText); } catch {}
-    const count = res?.fraud_block_count ?? 2;
-    setSuspensionReview({ summary, outcome: count >= 3 ? 'lock' : 'suspend10', reasonText });
+    elearningService.logExamEvent(examId, 'FRAUD_BLOCK', reason).catch(() => {});
+    setTimeLeft((t) => (t == null ? t : Math.max(0, t - FRAUD_SUSPEND_MIN * 60)));
+    setFraudBlock({ reason, until: Date.now() + FRAUD_SUSPEND_MIN * 60 * 1000 });
   }, [examId]);
 
-  // FraudSuspensionModal's onExpire — resolves to either a plain resume (no
-  // events captured), or hands off to escalateFraud/SuspensionReviewModal.
+  // FraudSuspensionModal's onExpire — just resumes.
   const handleSuspensionExpire = useCallback(() => {
-    const events = Object.values(suspensionEvents.current);
-    suspensionEvents.current = {};
     setFraudBlock(null);
-    if (events.length === 0) return;
-    setEscalating(true);
-    escalateFraud(events).finally(() => setEscalating(false));
-  }, [escalateFraud]);
-
-  // SuspensionReviewModal's acknowledgment — only now does the decided
-  // outcome (10-min suspension or exam closure) actually take effect.
-  const acknowledgeSuspensionReview = useCallback(() => {
-    setSuspensionReview((review) => {
-      if (!review) return null;
-      if (review.outcome === 'lock') {
-        setFraudLockMessage(review.reasonText);
-        Alert.alert(
-          'Examen terminé',
-          `${review.reasonText}\n\nComportement suspect détecté à plusieurs reprises. Votre copie est verrouillée et transmise en l'état à votre enseignant.`,
-        );
-        handleSubmit(true);
-      } else {
-        suspensionEvents.current = {};
-        setTimeLeft((t) => (t == null ? t : Math.max(0, t - 10 * 60)));
-        setFraudBlock({ reason: review.reasonText, until: Date.now() + 10 * 60 * 1000, stage: 2 });
-      }
-      return null;
-    });
-  }, [handleSubmit]);
+  }, []);
 
   // Start sequence — identical order to the web (quiz attempt quota checked
   // before the exam session is created; exam.duration_minutes governs the
@@ -647,20 +487,19 @@ export default function SecureExamTakeScreen({ route, navigation }) {
   // already deducted the 5-minute penalty up front instead) or while the
   // student hasn't granted the required camera yet.
   useEffect(() => {
-    if (phase !== 'exam' || timeLeft === null || fraudBlock || escalating || suspensionReview || cameraBlocking) return;
+    if (phase !== 'exam' || timeLeft === null || fraudBlock || cameraBlocking) return;
     if (timeLeft <= 0) { handleSubmit(true); return; }
     const t = setTimeout(() => setTimeLeft((s) => s - 1), 1000);
     return () => clearTimeout(t);
-  }, [phase, timeLeft, fraudBlock, escalating, suspensionReview, cameraBlocking, handleSubmit]);
+  }, [phase, timeLeft, fraudBlock, cameraBlocking, handleSubmit]);
 
   // Leaving the app (Alt-Tab equivalent) — mirrors the web exactly: the very
-  // first occurrence fires the fraud block (1st = 5-minute suspend, 2nd =
-  // immediate submit+lock via handleFraudBlock's own count>=2 check), no
-  // grace period. The check runs on *return* to active rather than at the
-  // moment of backgrounding (unlike the web's onBlur, which fires
-  // immediately) because JS execution — and so the logExamEvent/
-  // handleFraudBlock network calls — isn't reliably able to run while the
-  // app is actually suspended; resuming is the first reliable point to act.
+  // first occurrence fires the flat FRAUD_SUSPEND_MIN suspension, no grace
+  // period. The check runs on *return* to active rather than at the moment
+  // of backgrounding (unlike the web's onBlur, which fires immediately)
+  // because JS execution — and so the logExamEvent/handleFraudBlock network
+  // calls — isn't reliably able to run while the app is actually suspended;
+  // resuming is the first reliable point to act.
   useEffect(() => {
     if (phase !== 'exam') return;
     const sub = AppState.addEventListener('change', (next) => {
@@ -696,111 +535,25 @@ export default function SecureExamTakeScreen({ route, navigation }) {
     return () => sub.remove();
   }, [phase, navigation]);
 
-  // Server-side AI frame analysis loop (see WebcamMonitor above for capture
-  // cadence). Two-tier response, mirroring the web exactly: a single
-  // positive reading shows a lightweight banner; the SAME category
-  // reaching FRAUD_HIT_THRESHOLD cumulative hits escalates to handleFraudBlock.
-  // Returns true when the AI backend reported it was overloaded (a fallback
-  // "clean" result, not a real verdict) so WebcamMonitor's capture loop can
-  // back off instead of hammering an already-saturated quota — see
-  // MAX_DETECT_INTERVAL.
+  // Periodic frame archival (see WebcamMonitor above for capture cadence) —
+  // purely for the teacher's own review server-side, no phone/face/gaze
+  // reading acted on here anymore. Returns true when the AI backend
+  // reported it was overloaded (ai_available: false) so WebcamMonitor's
+  // capture loop can back off instead of hammering an already-saturated
+  // quota — see MAX_DETECT_INTERVAL.
   const onFrame = useCallback(async (uri) => {
     try {
       const fd = new FormData();
       fd.append('snapshot', { uri, name: `snap_${Date.now()}.jpg`, type: 'image/jpeg' });
-      // Checking on an *already suspended* student is the highest-value use
-      // of a scarce Gemini quota — flag it so the backend draws from its
-      // reserved priority slice instead of the general budget (see
-      // GEMINI_PRIORITY_RPM_RESERVE), which routine checks on other,
-      // not-yet-flagged students can't touch.
-      if (fraudBlockRef.current) fd.append('priority', '1');
       const res = await elearningService.uploadExamSnapshot(examId, fd);
-      setFaceOk(res.face_detected !== false);
-      const overloaded = res.ai_available === false;
-
-      if (fraudBlockRef.current) {
-        // Suspended (5- or 10-minute block) — keep watching instead of going
-        // blind, but route any positive reading into the suspension-review
-        // collector rather than the normal strike/threshold pipeline below,
-        // which is for detecting the *first* offense. Once already
-        // suspended, a single positive reading is worth surfacing to the
-        // student at the resume review, full stop — see onSuspensionEvent.
-        if (res.phone_detected) onSuspensionEvent('phone', 'Objet suspect (téléphone, cahier, notes...) tenu ou visible.');
-        else if (!res.face_detected) onSuspensionEvent('noFace', 'Absence du champ de la caméra (déplacement, éloignement, ou levé du poste).');
-        else if (res.multiple_faces) onSuspensionEvent('multiFace', 'Présence d\'une autre personne / conversation détectée.');
-        else if (res.looking_away) onSuspensionEvent('gaze', `Regard détourné de l'écran (${GAZE_LABELS[res.gaze_direction] || 'direction inconnue'}).`);
-        gazeEpisode.current = null; // don't let a streak spanning the pause boundary get misattributed once resumed
-        return overloaded;
-      }
-
-      const now = Date.now();
-      const cooldownOk = (key) => {
-        if (now - (lastAiFlagAt.current[key] || 0) < 20000) return false;
-        lastAiFlagAt.current[key] = now;
-        return true;
-      };
-
-      if (res.phone_detected) {
-        totals.current.phone++;
-        if (cooldownOk('phone')) showFlagBanner('Objet suspect détecté près de votre visage.');
-      }
-      if (!res.face_detected) {
-        totals.current.noFace++;
-        if (cooldownOk('noFace')) showFlagBanner('Visage non détecté — restez visible pendant l\'examen.');
-      }
-      if (res.multiple_faces) {
-        totals.current.multiFace++;
-        if (cooldownOk('multiFace')) showFlagBanner('Plusieurs visages détectés dans le champ de la caméra.');
-      }
-
-      // Duration-based looking-away escalation (see GAZE_* constants). Each
-      // tick here is a real ~5s network round-trip, so episode duration is
-      // approximated from consecutive positive-tick timestamps rather than
-      // continuous observation — this naturally slightly overestimates
-      // duration (it includes the round-trip latency), which is fine.
-      const nowT = Date.now();
-      if (res.looking_away) {
-        if (!gazeEpisode.current) gazeEpisode.current = nowT;
-        if (cooldownOk('gazeAway')) showFlagBanner(`Regard détourné de l'écran détecté (${GAZE_LABELS[res.gaze_direction] || 'direction inconnue'}).`);
-      } else if (gazeEpisode.current) {
-        const durationMs = nowT - gazeEpisode.current;
-        gazeEpisode.current = null;
-        if (durationMs > GAZE_STRIKE_MIN_MS) {
-          gazeIncidentCount.current++;
-          gazeTotalMs.current += durationMs;
-          const secs = Math.round(durationMs / 1000);
-          const totalMin = (gazeTotalMs.current / 60000).toFixed(1);
-          if (gazeIncidentCount.current >= GAZE_TOLERATED_INCIDENTS || gazeTotalMs.current >= GAZE_CUM_SUSPEND_MS) {
-            handleFraudBlock(`Regard détourné de l'écran répété (${gazeIncidentCount.current} épisodes, ${totalMin} min cumulées) — comportement suspect confirmé.`);
-          } else {
-            showFlagBanner(`Regard détourné pendant ${secs}s (${gazeIncidentCount.current} épisodes, ${totalMin} min cumulées). Restez face à l'écran.`);
-          }
-        }
-      }
-
-      if (totals.current.phone >= FRAUD_HIT_THRESHOLD) {
-        totals.current.phone = 0;
-        handleFraudBlock('Un objet suspect (téléphone, papier, ou autre) a été détecté à plusieurs reprises pendant l\'examen.');
-      } else if (totals.current.multiFace >= FRAUD_HIT_THRESHOLD) {
-        totals.current.multiFace = 0;
-        handleFraudBlock('Une autre personne a été détectée à plusieurs reprises dans le champ de la caméra — aide extérieure suspectée.');
-      } else if (totals.current.noFace >= NO_FACE_THRESHOLD) {
-        // More tolerant than phone/multi-face (see NO_FACE_THRESHOLD) — a
-        // phone lying flat on the table naturally misses the face while the
-        // student looks down to type, so this needs a sustained absence to
-        // mean something, not just a handful of scattered ticks.
-        totals.current.noFace = 0;
-        handleFraudBlock('Vous avez quitté le champ de la caméra à plusieurs reprises pendant l\'examen.');
-      }
-      return overloaded;
+      return res.ai_available === false;
     } catch {
-      // best-effort — a single failed upload/analysis tick isn't itself
-      // suspicious, but a network/server failure is exactly the kind of
-      // signal worth backing off from too (no point retrying every 5s into
-      // whatever's failing).
+      // best-effort — a single failed upload isn't itself suspicious, but a
+      // network/server failure is exactly the kind of signal worth backing
+      // off from too (no point retrying every 5s into whatever's failing).
       return true;
     }
-  }, [examId, handleFraudBlock, onSuspensionEvent]);
+  }, [examId]);
 
   const onWebcamLost = useCallback((detail) => {
     if (lostReported.current) return;
@@ -839,9 +592,7 @@ export default function SecureExamTakeScreen({ route, navigation }) {
               <View style={[styles.resultIconWrap, { backgroundColor: '#7C3AED' }]}>
                 <Ionicons name="document-text" size={30} color="#fff" />
               </View>
-              <Text style={[styles.resultTitle, { color: '#7C3AED' }]}>
-                {fraudLockMessage ? 'Examen terminé (comportement suspect)' : 'Copie transmise'}
-              </Text>
+              <Text style={[styles.resultTitle, { color: '#7C3AED' }]}>Copie transmise</Text>
               <Text style={styles.resultPoints}>En attente de correction par votre enseignant.</Text>
             </View>
             <TouchableOpacity style={styles.backHomeBtn} onPress={() => navigation.goBack()}>
@@ -862,7 +613,7 @@ export default function SecureExamTakeScreen({ route, navigation }) {
               <Ionicons name={pending ? 'alert-circle' : passed ? 'trophy' : 'close-circle'} size={30} color="#fff" />
             </View>
             <Text style={[styles.resultTitle, { color: passed ? colors.success : pending ? '#B45309' : colors.danger }]}>
-              {fraudLockMessage ? 'Examen terminé (comportement suspect)' : pending ? 'En attente de correction' : passed ? 'Réussi !' : 'Non validé'}
+              {pending ? 'En attente de correction' : passed ? 'Réussi !' : 'Non validé'}
             </Text>
             <Text style={[styles.resultScore, { color: passed ? colors.success : pending ? '#B45309' : colors.danger }]}>{score.toFixed(1)}%</Text>
             <Text style={styles.resultPoints}>{result?.score}/{result?.max_score} points</Text>
@@ -905,44 +656,20 @@ export default function SecureExamTakeScreen({ route, navigation }) {
         />
       )}
 
-      {fraudBlock && !suspensionReview && (
+      {fraudBlock && (
         <FraudSuspensionModal
           reason={fraudBlock.reason}
           until={fraudBlock.until}
-          stage={fraudBlock.stage}
           onExpire={handleSuspensionExpire}
         />
       )}
 
-      {suspensionReview && (
-        <SuspensionReviewModal
-          summary={suspensionReview.summary}
-          outcome={suspensionReview.outcome}
-          onAcknowledge={acknowledgeSuspensionReview}
-        />
-      )}
-
-      {!!flagBanner && (
-        <View style={styles.flagBanner}>
-          <Ionicons name="warning" size={16} color="#fff" />
-          <Text style={styles.flagBannerText} numberOfLines={2}>{flagBanner}</Text>
-        </View>
-      )}
-
-      <PdfViewerModal visible={showPdf} url={exam?.exam_pdf} onClose={() => setShowPdf(false)} />
-
       <View style={styles.quizHeader}>
-        <WebcamMonitor enabled={!!exam?.webcam_required} permission={permission} onFrame={onFrame} onLost={onWebcamLost} faceOk={faceOk} />
+        <WebcamMonitor enabled={!!exam?.webcam_required} permission={permission} onFrame={onFrame} onLost={onWebcamLost} />
         <View style={{ flex: 1 }}>
           <Text style={styles.quizHeaderTitle} numberOfLines={1}>{exam?.title}</Text>
           <Text style={styles.quizHeaderSub}>{answeredCount}/{questions.length} répondues · examen surveillé</Text>
         </View>
-        {!!exam?.exam_pdf && (
-          <TouchableOpacity style={styles.pdfBtn} onPress={() => setShowPdf(true)}>
-            <Ionicons name="document-text-outline" size={15} color="#fff" />
-            <Text style={styles.pdfBtnText}>Sujet</Text>
-          </TouchableOpacity>
-        )}
         {timeLeft !== null && (
           <View style={[styles.timerBox, timerRed && { backgroundColor: colors.dangerLight }]}>
             <Ionicons name="time-outline" size={13} color={timerRed ? colors.danger : '#059669'} />
@@ -954,72 +681,95 @@ export default function SecureExamTakeScreen({ route, navigation }) {
         <View style={[styles.progressFill, { width: `${(answeredCount / Math.max(questions.length, 1)) * 100}%`, backgroundColor: allDone ? colors.success : '#059669' }]} />
       </View>
 
-      {/* Questions / Réponse PDF switcher — only shown when the exam
-          combines a quiz AND a PDF subject. */}
-      {hasQuestions && hasPdfAnswer && (
-        <View style={styles.tabRow}>
-          <TouchableOpacity
-            style={[styles.tabBtn, effectiveTab === 'questions' && styles.tabBtnActive]}
-            onPress={() => setContentTab('questions')}
-          >
-            <Ionicons name="list-outline" size={14} color={effectiveTab === 'questions' ? '#fff' : colors.textSecondary} />
-            <Text style={[styles.tabBtnText, effectiveTab === 'questions' && styles.tabBtnTextActive]}>
-              Questions ({answeredCount}/{questions.length})
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tabBtn, effectiveTab === 'pdf' && styles.tabBtnActivePurple]}
-            onPress={() => setContentTab('pdf')}
-          >
-            <Ionicons name="document-text-outline" size={14} color={effectiveTab === 'pdf' ? '#fff' : colors.textSecondary} />
-            <Text style={[styles.tabBtnText, effectiveTab === 'pdf' && styles.tabBtnTextActive]}>Réponse PDF</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      <ScrollView contentContainerStyle={styles.quizScroll}>
-        {effectiveTab === 'questions' && hasQuestions && questions.map((qn, idx) => {
-          const done = isAnswered(answers[qn.id]);
-          return (
-            <View key={qn.id} style={[styles.qCard, { borderColor: done ? '#BBF7D0' : colors.border }]}>
-              <View style={[styles.qCardHeader, { backgroundColor: done ? '#F0FDF4' : '#FAFBFF' }]}>
-                <View style={styles.qCardHeaderLeft}>
-                  <View style={[styles.qIdx, { backgroundColor: done ? colors.success : '#059669' }]}>
-                    <Text style={styles.qIdxText}>{idx + 1}</Text>
-                  </View>
-                  <Text style={[styles.qStatus, { color: done ? colors.success : '#059669' }]}>
-                    {done ? '✓ Répondue' : `Question ${idx + 1}/${questions.length}`}
-                  </Text>
-                </View>
-                <Text style={styles.qPts}>{qn.points} pt{qn.points > 1 ? 's' : ''}</Text>
-              </View>
-              <View style={styles.qBody}>
-                <Text style={styles.qText}>{qn.text}</Text>
-                <QuestionRenderer question={qn} answer={answers[qn.id]} onAnswer={setAnswer} secure />
-              </View>
+      <View style={{ flex: 1 }}>
+        {/* Sujet — shown automatically the moment composition starts (no more
+            tap-to-open button/modal), taking half the screen above the
+            questions/answer. Routed through Google Docs Viewer (see the old
+            PdfViewerModal) since Android's system WebView can't reliably
+            render a raw PDF uri; never Linking.openURL, which would trip the
+            AppState-based fraud detector. */}
+        {hasPdfAnswer && (
+          <View style={{ flex: 1 }}>
+            <View style={styles.subjectHeader}>
+              <Ionicons name="document-text-outline" size={14} color="#fff" />
+              <Text style={styles.subjectHeaderText}>Sujet de l'examen</Text>
             </View>
-          );
-        })}
-
-        {effectiveTab === 'pdf' && hasPdfAnswer && (
-          <PdfAnswerSection
-            sessionId={session?.id}
-            content={pdfContent} setContent={setPdfContent}
-            error={pdfError}
-          />
+            <WebView
+              source={{ uri: `https://docs.google.com/viewer?url=${encodeURIComponent(exam.exam_pdf)}&embedded=true` }}
+              style={{ flex: 1 }}
+            />
+          </View>
         )}
 
-        <TouchableOpacity
-          style={[styles.finishBtn, allDone && { backgroundColor: colors.success }]}
-          onPress={confirmSubmit}
-          disabled={submitting}
-        >
-          {submitting ? <ActivityIndicator color="#fff" size="small" /> : <Ionicons name="send" size={16} color="#fff" />}
-          <Text style={styles.finishBtnText}>
-            {submitting ? 'Envoi...' : hasQuestions ? `Terminer · ${answeredCount}/${questions.length}` : 'Terminer et soumettre'}
-          </Text>
-        </TouchableOpacity>
-      </ScrollView>
+        <View style={{ flex: 1 }}>
+          {/* Questions / Réponse PDF switcher — only shown when the exam
+              combines a quiz AND a PDF subject. */}
+          {hasQuestions && hasPdfAnswer && (
+            <View style={styles.tabRow}>
+              <TouchableOpacity
+                style={[styles.tabBtn, effectiveTab === 'questions' && styles.tabBtnActive]}
+                onPress={() => setContentTab('questions')}
+              >
+                <Ionicons name="list-outline" size={14} color={effectiveTab === 'questions' ? '#fff' : colors.textSecondary} />
+                <Text style={[styles.tabBtnText, effectiveTab === 'questions' && styles.tabBtnTextActive]}>
+                  Questions ({answeredCount}/{questions.length})
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tabBtn, effectiveTab === 'pdf' && styles.tabBtnActivePurple]}
+                onPress={() => setContentTab('pdf')}
+              >
+                <Ionicons name="document-text-outline" size={14} color={effectiveTab === 'pdf' ? '#fff' : colors.textSecondary} />
+                <Text style={[styles.tabBtnText, effectiveTab === 'pdf' && styles.tabBtnTextActive]}>Réponse PDF</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.quizScroll}>
+            {effectiveTab === 'questions' && hasQuestions && questions.map((qn, idx) => {
+              const done = isAnswered(answers[qn.id]);
+              return (
+                <View key={qn.id} style={[styles.qCard, { borderColor: done ? '#BBF7D0' : colors.border }]}>
+                  <View style={[styles.qCardHeader, { backgroundColor: done ? '#F0FDF4' : '#FAFBFF' }]}>
+                    <View style={styles.qCardHeaderLeft}>
+                      <View style={[styles.qIdx, { backgroundColor: done ? colors.success : '#059669' }]}>
+                        <Text style={styles.qIdxText}>{idx + 1}</Text>
+                      </View>
+                      <Text style={[styles.qStatus, { color: done ? colors.success : '#059669' }]}>
+                        {done ? '✓ Répondue' : `Question ${idx + 1}/${questions.length}`}
+                      </Text>
+                    </View>
+                    <Text style={styles.qPts}>{qn.points} pt{qn.points > 1 ? 's' : ''}</Text>
+                  </View>
+                  <View style={styles.qBody}>
+                    <Text style={styles.qText}>{qn.text}</Text>
+                    <QuestionRenderer question={qn} answer={answers[qn.id]} onAnswer={setAnswer} secure />
+                  </View>
+                </View>
+              );
+            })}
+
+            {effectiveTab === 'pdf' && hasPdfAnswer && (
+              <PdfAnswerSection
+                sessionId={session?.id}
+                content={pdfContent} setContent={setPdfContent}
+                error={pdfError}
+              />
+            )}
+
+            <TouchableOpacity
+              style={[styles.finishBtn, allDone && { backgroundColor: colors.success }]}
+              onPress={confirmSubmit}
+              disabled={submitting}
+            >
+              {submitting ? <ActivityIndicator color="#fff" size="small" /> : <Ionicons name="send" size={16} color="#fff" />}
+              <Text style={styles.finishBtnText}>
+                {submitting ? 'Envoi...' : hasQuestions ? `Terminer · ${answeredCount}/${questions.length}` : 'Terminer et soumettre'}
+              </Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
@@ -1040,15 +790,8 @@ const styles = StyleSheet.create({
   quizHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: 8, backgroundColor: '#fff' },
   quizHeaderTitle: { fontSize: 14, fontWeight: '800', color: colors.text },
   quizHeaderSub: { fontSize: 11, color: colors.textTertiary, marginTop: 1 },
-  // Deliberately solid/high-contrast (not a subtle chip) — this is the
-  // primary way to (re-)read the subject during a surveilled exam and needs
-  // to stand out next to the timer.
-  pdfBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#7C3AED',
-    paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.md,
-    shadowColor: '#7C3AED', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 6, elevation: 3,
-  },
-  pdfBtnText: { fontSize: 12, fontWeight: '800', color: '#fff' },
+  subjectHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#7C3AED', paddingHorizontal: spacing.md, paddingVertical: 8 },
+  subjectHeaderText: { fontSize: 12, fontWeight: '800', color: '#fff' },
 
   tabRow: { flexDirection: 'row', gap: 8, paddingHorizontal: spacing.md, paddingTop: spacing.sm, backgroundColor: '#fff' },
   tabBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 9, borderRadius: radius.md, backgroundColor: colors.background },
@@ -1088,9 +831,6 @@ const styles = StyleSheet.create({
   webcamWrap: { width: 48, height: 36, borderRadius: 8, overflow: 'hidden', backgroundColor: '#111827' },
   webcamDot: { position: 'absolute', top: 2, right: 2, width: 8, height: 8, borderRadius: 4, borderWidth: 1, borderColor: '#fff' },
 
-  flagBanner: { position: 'absolute', top: 8, left: 12, right: 12, zIndex: 20, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#B91C1C', borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 6, elevation: 6 },
-  flagBannerText: { flex: 1, color: '#fff', fontSize: 12, fontWeight: '700' },
-
   suspendOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   suspendCard: { backgroundColor: '#fff', borderRadius: radius.xl, padding: spacing.lg, alignItems: 'center', gap: 12, maxWidth: 420, width: '100%' },
   suspendIconWrap: { width: 76, height: 76, borderRadius: 38, backgroundColor: colors.dangerLight, borderWidth: 3, borderColor: '#FCA5A5', alignItems: 'center', justifyContent: 'center' },
@@ -1098,14 +838,6 @@ const styles = StyleSheet.create({
   suspendReason: { fontSize: 13, color: colors.textSecondary, textAlign: 'center', lineHeight: 19 },
   suspendTimer: { fontSize: 42, fontWeight: '900', color: colors.danger, fontVariant: ['tabular-nums'] },
   suspendNote: { fontSize: 11, color: colors.textTertiary, textAlign: 'center', lineHeight: 16 },
-
-  reviewList: { width: '100%', gap: 8, backgroundColor: colors.dangerLight, borderRadius: radius.lg, padding: spacing.md },
-  reviewItem: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
-  reviewDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.danger, marginTop: 6 },
-  reviewItemText: { flex: 1, fontSize: 12, color: '#7F1D1D', lineHeight: 17 },
-  reviewOutcome: { fontSize: 13, fontWeight: '800', color: colors.danger, textAlign: 'center' },
-  reviewAckBtn: { width: '100%', paddingVertical: 14, borderRadius: radius.lg, backgroundColor: colors.danger, alignItems: 'center' },
-  reviewAckBtnText: { fontSize: 14, fontWeight: '900', color: '#fff' },
 
   gateIconWrap: { width: 76, height: 76, borderRadius: 38, backgroundColor: colors.dangerLight, alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
   gateTitle: { fontSize: 17, fontWeight: '900', color: colors.text, textAlign: 'center', paddingHorizontal: 24 },
