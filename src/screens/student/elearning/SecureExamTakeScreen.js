@@ -28,6 +28,20 @@ const MAX_DETECT_INTERVAL = 20000;
 // (copy/paste equivalent). Never escalates, never auto-submits the exam.
 const FRAUD_SUSPEND_MIN = 5;
 
+// Anti-multi-device: interval between two heartbeat pings to the backend
+// while an exam is in progress. Must stay comfortably under the server's
+// DEVICE_LOCK_STALE_SECONDS (60s) so a single slow/dropped request doesn't
+// make another device think this one is gone. Mirrors ExamPage.jsx (web).
+const HEARTBEAT_INTERVAL_MS = 20000;
+
+// Identifies this app launch (not this student) for the "one device at a
+// time" exam lock — a fresh token per mount is fine: a killed/relaunched
+// app is treated the same as a genuinely new device taking over once the
+// previous token goes stale server-side.
+function makeDeviceToken() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function formatTime(secs) {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
@@ -332,6 +346,8 @@ export default function SecureExamTakeScreen({ route, navigation }) {
   const backgroundedAt = useRef(null);
   const lostReported = useRef(false);
   const autoRequestedCamera = useRef(false);
+  const deviceTokenRef = useRef(null);
+  if (!deviceTokenRef.current) deviceTokenRef.current = makeDeviceToken();
 
   useEffect(() => { fraudBlockRef.current = fraudBlock; }, [fraudBlock]);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
@@ -453,7 +469,7 @@ export default function SecureExamTakeScreen({ route, navigation }) {
           const fullQuiz = await elearningService.getQuizById(examData.quiz);
           qs = fullQuiz.questions || [];
         }
-        const sess = await elearningService.startExamSession(examId);
+        const sess = await elearningService.startExamSession(examId, deviceTokenRef.current);
         setSession(sess);
         if (att) { setAttempt(att); setQuestions(qs); }
         if (!att && sess?.submission_note) setPdfContent(sess.submission_note);
@@ -470,6 +486,25 @@ export default function SecureExamTakeScreen({ route, navigation }) {
       }
     })();
   }, [examId]);
+
+  // Anti-multi-device: periodic heartbeat while the exam is in progress. If
+  // another device has taken over the lock (this one went quiet too long —
+  // app backgrounded/killed), the server starts rejecting our heartbeats;
+  // deliberately does NOT auto-submit here, since the other device may now
+  // be the one genuinely finishing the exam — this one just backs off.
+  useEffect(() => {
+    if (phase !== 'exam') return undefined;
+    const t = setInterval(() => {
+      elearningService.heartbeatExamSession(examId, deviceTokenRef.current).catch((e) => {
+        if (e?.response?.data?.code === 'DEVICE_LOCKED') {
+          clearInterval(t);
+          setError(e.response.data.detail || 'Votre session a été reprise sur un autre appareil.');
+          setPhase('error');
+        }
+      });
+    }, HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(t);
+  }, [phase, examId]);
 
   // A webcam_required exam must not proceed monitored-but-blind: request
   // camera access as soon as the exam loads, and gate the actual questions
