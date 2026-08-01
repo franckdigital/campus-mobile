@@ -106,7 +106,10 @@ export const elearningService = {
   getExamSessions: (examId) => apiClient.get(`/elearning/exams/${examId}/sessions/`).then((r) => r.data),
   gradeExamSession: (sessionId, data) =>
     apiClient.post(`/elearning/exam-sessions/${sessionId}/grade/`, data, multipartConfig(data)).then((r) => r.data),
-  startExamSession: (examId) => apiClient.post(`/elearning/exams/${examId}/start-session/`).then((r) => r.data),
+  startExamSession: (examId, deviceToken) =>
+    apiClient.post(`/elearning/exams/${examId}/start-session/`, { device_token: deviceToken }).then((r) => r.data),
+  heartbeatExamSession: (examId, deviceToken) =>
+    apiClient.post(`/elearning/exams/${examId}/heartbeat/`, { device_token: deviceToken }).then((r) => r.data),
   logExamEvent: (examId, eventType, details = {}) =>
     apiClient.post(`/elearning/exams/${examId}/log-event/`, { event_type: eventType, details }).then((r) => r.data),
   getExamRanking: (examId) => apiClient.get(`/elearning/exams/${examId}/ranking/`).then((r) => r.data),
