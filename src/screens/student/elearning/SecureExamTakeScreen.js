@@ -15,18 +15,26 @@ import QuestionRenderer, { isAnswered } from '../../../components/quiz/QuestionR
 import { colors, spacing, radius } from '../../../theme/colors';
 
 // How often a webcam frame is captured and archived server-side while the
-// exam is active — purely for the teacher's own review, no automatic
-// consequence attached to it anymore (no phone/face/gaze detection reacted
-// to on the client).
+// exam is active. Also drives the gaze-direction fraud check below — see
+// GAZE_AWAY_STREAK_FOR_30S.
 const DETECT_INTERVAL = 5000;
 // Ceiling for the adaptive backoff below — if the AI backend keeps signaling
 // it's overloaded (ai_available: false), captures space out up to this much
 // instead of retrying every 5s into a saturated quota.
 const MAX_DETECT_INTERVAL = 20000;
-// Flat suspension duration for the only two anti-cheat triggers left:
-// leaving the app (tab/window-switch equivalent) or a screenshot attempt
-// (copy/paste equivalent). Never escalates, never auto-submits the exam.
+// Flat suspension duration for every anti-cheat trigger below: leaving the
+// app, a screenshot attempt, or a sustained averted gaze. Each individual
+// block still just pauses/resumes — only crossing FRAUD_AUTO_SUBMIT_THRESHOLD
+// total blocks (see handleFraudBlock) auto-submits the exam instead.
 const FRAUD_SUSPEND_MIN = 5;
+// 1st block suspends (as always) + 3 récidives (repeat offenses) also
+// suspend — the 4th total block is what auto-submits the exam outright.
+// Mirrors ExamPage.jsx (web).
+const FRAUD_AUTO_SUBMIT_THRESHOLD = 4;
+// Consecutive "looking away" snapshot verdicts (see onFrame below) needed to
+// treat an averted gaze as sustained rather than a brief, innocent glance —
+// approximates 30s regardless of DETECT_INTERVAL's adaptive backoff.
+const GAZE_AWAY_STREAK_FOR_30S = Math.max(1, Math.round(30000 / DETECT_INTERVAL));
 
 // Anti-multi-device: interval between two heartbeat pings to the backend
 // while an exam is in progress. Must stay comfortably under the server's
@@ -348,6 +356,7 @@ export default function SecureExamTakeScreen({ route, navigation }) {
   const autoRequestedCamera = useRef(false);
   const deviceTokenRef = useRef(null);
   if (!deviceTokenRef.current) deviceTokenRef.current = makeDeviceToken();
+  const gazeAwayStreakRef = useRef(0);
 
   useEffect(() => { fraudBlockRef.current = fraudBlock; }, [fraudBlock]);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
@@ -431,15 +440,26 @@ export default function SecureExamTakeScreen({ route, navigation }) {
     }
   }, [attempt, session, answers, questions, exam, pdfContent]);
 
-  // Suspension handler — shared by the app-switch detector and the
-  // screenshot listener above, the only two things left that suspend an
-  // exam. Always a flat FRAUD_SUSPEND_MIN minutes, logged server-side for
-  // the teacher's own review (fraud_block_count), but never escalates and
-  // never ends the exam on its own — the student just waits it out and
-  // resumes exactly where they were.
+  // Kept separate from handleFraudBlock's own deps (just [examId], stable)
+  // so referencing handleSubmit here doesn't churn handleFraudBlock's (and
+  // therefore onFrame's, see WebcamMonitor's onFrameRef comment above)
+  // identity on every answer edit — handleSubmit itself depends on `answers`.
+  const handleSubmitRef = useRef(handleSubmit);
+  useEffect(() => { handleSubmitRef.current = handleSubmit; }, [handleSubmit]);
+
+  // Suspension handler — shared by the app-switch detector, the screenshot
+  // listener above, and the sustained-averted-gaze check in onFrame below.
+  // Always a flat FRAUD_SUSPEND_MIN minutes, logged server-side for the
+  // teacher's own review (fraud_block_count) — each individual block still
+  // just pauses/resumes, only crossing FRAUD_AUTO_SUBMIT_THRESHOLD total
+  // blocks auto-submits the exam outright instead.
   const handleFraudBlock = useCallback((reason) => {
     if (phaseRef.current !== 'exam' || fraudBlockRef.current) return;
-    elearningService.logExamEvent(examId, 'FRAUD_BLOCK', reason).catch(() => {});
+    elearningService.logExamEvent(examId, 'FRAUD_BLOCK', reason).then((res) => {
+      if ((res?.fraud_block_count ?? 0) >= FRAUD_AUTO_SUBMIT_THRESHOLD) {
+        handleSubmitRef.current?.(true);
+      }
+    }).catch(() => {});
     setTimeLeft((t) => (t == null ? t : Math.max(0, t - FRAUD_SUSPEND_MIN * 60)));
     setFraudBlock({ reason, until: Date.now() + FRAUD_SUSPEND_MIN * 60 * 1000 });
   }, [examId]);
@@ -571,16 +591,26 @@ export default function SecureExamTakeScreen({ route, navigation }) {
   }, [phase, navigation]);
 
   // Periodic frame archival (see WebcamMonitor above for capture cadence) —
-  // purely for the teacher's own review server-side, no phone/face/gaze
-  // reading acted on here anymore. Returns true when the AI backend
-  // reported it was overloaded (ai_available: false) so WebcamMonitor's
-  // capture loop can back off instead of hammering an already-saturated
-  // quota — see MAX_DETECT_INTERVAL.
+  // also reacts to Gemini's gaze_direction verdict: GAZE_AWAY_STREAK_FOR_30S
+  // consecutive "looking away" frames (any face sighting resets the streak,
+  // same spirit as the old NO_FACE_SUSPEND_MS on web) suspends the exam.
+  // Returns true when the AI backend reported it was overloaded
+  // (ai_available: false) so WebcamMonitor's capture loop can back off
+  // instead of hammering an already-saturated quota — see MAX_DETECT_INTERVAL.
   const onFrame = useCallback(async (uri) => {
     try {
       const fd = new FormData();
       fd.append('snapshot', { uri, name: `snap_${Date.now()}.jpg`, type: 'image/jpeg' });
       const res = await elearningService.uploadExamSnapshot(examId, fd);
+      if (res.looking_away) {
+        gazeAwayStreakRef.current += 1;
+        if (gazeAwayStreakRef.current >= GAZE_AWAY_STREAK_FOR_30S) {
+          gazeAwayStreakRef.current = 0;
+          handleFraudBlock('Regard détourné de l\'écran détecté pendant plus de 30 secondes.');
+        }
+      } else {
+        gazeAwayStreakRef.current = 0;
+      }
       return res.ai_available === false;
     } catch {
       // best-effort — a single failed upload isn't itself suspicious, but a
@@ -588,7 +618,7 @@ export default function SecureExamTakeScreen({ route, navigation }) {
       // off from too (no point retrying every 5s into whatever's failing).
       return true;
     }
-  }, [examId]);
+  }, [examId, handleFraudBlock]);
 
   const onWebcamLost = useCallback((detail) => {
     if (lostReported.current) return;
