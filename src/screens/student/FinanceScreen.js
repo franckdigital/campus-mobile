@@ -14,7 +14,7 @@ import ConfirmModal from '../../components/common/ConfirmModal';
 import { colors, spacing, radius } from '../../theme/colors';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  PaymentTab, ManualMoneyModal, FinStat,
+  PaymentTab, ManualMoneyModal, PaymentModal, FreePaymentModal, FinStat,
   aggregateInvoices, fmt, fmtN,
 } from '../../components/finance/PaymentPanel';
 
@@ -44,6 +44,10 @@ export default function StudentFinanceScreen({ navigation }) {
   const [preparingInvoices, setPreparingInvoices] = useState(false);
   const [payModal,          setPayModal]          = useState({ visible: false, invoice: null, fixedAmount: null, label: '' });
   const [freePayVisible,    setFreePayVisible]    = useState(false);
+  // CinetPay online checkout — alternative to the manual Mobile Money flow
+  // above, reuses the same target invoice/student.
+  const [cinetPayInvoice, setCinetPayInvoice] = useState(null);
+  const [freeCinetPayVisible, setFreeCinetPayVisible] = useState(false);
   const [errorModal,        setErrorModal]        = useState({ visible: false, message: '' });
 
   /* ── fetch ── */
@@ -245,6 +249,8 @@ export default function StudentFinanceScreen({ navigation }) {
             onPrepareInvoices={handlePrepareInvoices}
             preparingInvoices={preparingInvoices}
             onFreePay={() => setFreePayVisible(true)}
+            onPayPressOnline={(invoice) => setCinetPayInvoice(invoice)}
+            onFreePayOnline={() => setFreeCinetPayVisible(true)}
           />
         </ScrollView>
 
@@ -341,6 +347,20 @@ export default function StudentFinanceScreen({ navigation }) {
         studentId={studentId}
         onClose={() => setFreePayVisible(false)}
         onSuccess={() => { setFreePayVisible(false); fetchData(); }}
+      />
+
+      {/* ── CinetPay online checkout — alternative to the manual flows above ── */}
+      <PaymentModal
+        visible={!!cinetPayInvoice}
+        invoice={cinetPayInvoice}
+        onClose={() => setCinetPayInvoice(null)}
+        onSuccess={() => { setCinetPayInvoice(null); fetchData(); }}
+      />
+      <FreePaymentModal
+        visible={freeCinetPayVisible}
+        studentId={studentId}
+        onClose={() => setFreeCinetPayVisible(false)}
+        onSuccess={() => { setFreeCinetPayVisible(false); fetchData(); }}
       />
 
       {/* ── error modal ── */}

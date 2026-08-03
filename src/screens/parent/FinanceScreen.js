@@ -14,7 +14,7 @@ import EmptyState from '../../components/common/EmptyState';
 import ConfirmModal from '../../components/common/ConfirmModal';
 import { colors, spacing, radius } from '../../theme/colors';
 import {
-  PaymentTab, ManualMoneyModal, FinStat,
+  PaymentTab, ManualMoneyModal, PaymentModal, FreePaymentModal, FinStat,
   aggregateInvoices, fmt, fmtN,
 } from '../../components/finance/PaymentPanel';
 
@@ -44,6 +44,10 @@ export default function ParentFinanceScreen({ navigation, route }) {
   const [preparingInvoices, setPreparingInvoices] = useState(false);
   const [payModal, setPayModal]         = useState({ visible: false, invoice: null, fixedAmount: null, label: '' });
   const [freePayVisible, setFreePayVisible] = useState(false);
+  // CinetPay online checkout — alternative to the manual Mobile Money flow
+  // above, reuses the same target invoice/student.
+  const [cinetPayInvoice, setCinetPayInvoice] = useState(null);
+  const [freeCinetPayVisible, setFreeCinetPayVisible] = useState(false);
   const [errorModal, setErrorModal]     = useState({ visible: false, message: '' });
 
   // ── load child finance detail ──────────────────────────────────────────────
@@ -140,6 +144,11 @@ export default function ParentFinanceScreen({ navigation, route }) {
 
   const onPaymentSuccess = useCallback(() => {
     closePayModal();
+    if (selected) loadChildFinance(selected);
+  }, [selected, loadChildFinance]);
+
+  const onCinetPaySuccess = useCallback(() => {
+    setCinetPayInvoice(null);
     if (selected) loadChildFinance(selected);
   }, [selected, loadChildFinance]);
 
@@ -298,6 +307,8 @@ export default function ParentFinanceScreen({ navigation, route }) {
             onPrepareInvoices={handlePrepareInvoices}
             preparingInvoices={preparingInvoices}
             onFreePay={() => setFreePayVisible(true)}
+            onPayPressOnline={(invoice) => setCinetPayInvoice(invoice)}
+            onFreePayOnline={() => setFreeCinetPayVisible(true)}
             prepareTitle="Préparer le dossier de paiement"
             prepareSub="Appuyez pour créer les factures et activer le paiement"
           />
@@ -407,6 +418,20 @@ export default function ParentFinanceScreen({ navigation, route }) {
         studentId={selected?.id}
         onClose={() => setFreePayVisible(false)}
         onSuccess={() => { setFreePayVisible(false); if (selected) loadChildFinance(selected); }}
+      />
+
+      {/* ── CinetPay online checkout — alternative to the manual flows above ── */}
+      <PaymentModal
+        visible={!!cinetPayInvoice}
+        invoice={cinetPayInvoice}
+        onClose={() => setCinetPayInvoice(null)}
+        onSuccess={onCinetPaySuccess}
+      />
+      <FreePaymentModal
+        visible={freeCinetPayVisible}
+        studentId={selected?.id}
+        onClose={() => setFreeCinetPayVisible(false)}
+        onSuccess={() => { setFreeCinetPayVisible(false); if (selected) loadChildFinance(selected); }}
       />
 
       {/* ── error modal ── */}
