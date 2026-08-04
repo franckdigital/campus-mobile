@@ -66,7 +66,7 @@ export default function LoginScreen() {
                   <Ionicons name="school" size={40} color="#fff" />
                 </LinearGradient>
               </View>
-              <Text style={styles.brand}>Campus School</Text>
+              <Text style={styles.brand}>Campus LMS Pro</Text>
               <Text style={styles.tagline}>Plateforme de gestion scolaire</Text>
             </View>
 
@@ -154,7 +154,7 @@ export default function LoginScreen() {
             </View>
 
             {/* Footer */}
-            <Text style={styles.footer}>© 2025 Campus School · Tous droits réservés</Text>
+            <Text style={styles.footer}>© 2025 Campus LMS Pro · Tous droits réservés</Text>
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
