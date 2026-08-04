@@ -576,11 +576,18 @@ export default function SecureExamTakeScreen({ route, navigation }) {
   // reported it was overloaded (ai_available: false) so WebcamMonitor's
   // capture loop can back off instead of hammering an already-saturated
   // quota — see MAX_DETECT_INTERVAL.
+  // A second person in frame is unambiguous on its own — unlike a momentary
+  // distraction, it doesn't need a sustained streak before it's worth
+  // suspending over (handleFraudBlock's own phase/fraudBlock guard already
+  // prevents stacking a second suspension on one already showing).
   const onFrame = useCallback(async (uri) => {
     try {
       const fd = new FormData();
       fd.append('snapshot', { uri, name: `snap_${Date.now()}.jpg`, type: 'image/jpeg' });
       const res = await elearningService.uploadExamSnapshot(examId, fd);
+      if (res.multiple_faces) {
+        handleFraudBlock('Une autre personne a été détectée à côté ou derrière le candidat.');
+      }
       return res.ai_available === false;
     } catch {
       // best-effort — a single failed upload isn't itself suspicious, but a
@@ -588,7 +595,7 @@ export default function SecureExamTakeScreen({ route, navigation }) {
       // off from too (no point retrying every 5s into whatever's failing).
       return true;
     }
-  }, [examId]);
+  }, [examId, handleFraudBlock]);
 
   const onWebcamLost = useCallback((detail) => {
     if (lostReported.current) return;
