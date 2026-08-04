@@ -16,7 +16,7 @@ import { colors, spacing, radius } from '../../../theme/colors';
 
 // How often a webcam frame is captured and archived server-side while the
 // exam is active. Also drives the gaze-direction fraud check below — see
-// GAZE_AWAY_STREAK_FOR_30S.
+// onFrame's gazeStreakNeeded (derived from exam.gaze_away_seconds).
 const DETECT_INTERVAL = 5000;
 // Ceiling for the adaptive backoff below — if the AI backend keeps signaling
 // it's overloaded (ai_available: false), captures space out up to this much
@@ -31,11 +31,6 @@ const FRAUD_SUSPEND_MIN = 5;
 // suspend — the 4th total block is what auto-submits the exam outright.
 // Mirrors ExamPage.jsx (web).
 const FRAUD_AUTO_SUBMIT_THRESHOLD = 4;
-// Consecutive "looking away" snapshot verdicts (see onFrame below) needed to
-// treat an averted gaze as sustained rather than a brief, innocent glance —
-// approximates 30s regardless of DETECT_INTERVAL's adaptive backoff.
-const GAZE_AWAY_STREAK_FOR_30S = Math.max(1, Math.round(30000 / DETECT_INTERVAL));
-
 // Anti-multi-device: interval between two heartbeat pings to the backend
 // while an exam is in progress. Must stay comfortably under the server's
 // DEVICE_LOCK_STALE_SECONDS (60s) so a single slow/dropped request doesn't
@@ -591,22 +586,31 @@ export default function SecureExamTakeScreen({ route, navigation }) {
   }, [phase, navigation]);
 
   // Periodic frame archival (see WebcamMonitor above for capture cadence) —
-  // also reacts to Gemini's gaze_direction verdict: GAZE_AWAY_STREAK_FOR_30S
-  // consecutive "looking away" frames (any face sighting resets the streak,
-  // same spirit as the old NO_FACE_SUSPEND_MS on web) suspends the exam.
-  // Returns true when the AI backend reported it was overloaded
-  // (ai_available: false) so WebcamMonitor's capture loop can back off
-  // instead of hammering an already-saturated quota — see MAX_DETECT_INTERVAL.
+  // also reacts to Gemini's verdicts: a second person in frame suspends
+  // immediately (unambiguous on its own, no streak needed), and
+  // gazeStreakNeeded consecutive "looking away" frames (any face sighting
+  // resets the streak, same spirit as the old NO_FACE_SUSPEND_MS on web)
+  // suspends too — gazeStreakNeeded is derived from the admin-configurable
+  // exam.gaze_away_seconds (default 30) and DETECT_INTERVAL, so a shorter/
+  // longer tolerance set in ExamManager is honored on mobile too. Returns
+  // true when the AI backend reported it was overloaded (ai_available:
+  // false) so WebcamMonitor's capture loop can back off instead of
+  // hammering an already-saturated quota — see MAX_DETECT_INTERVAL.
   const onFrame = useCallback(async (uri) => {
     try {
       const fd = new FormData();
       fd.append('snapshot', { uri, name: `snap_${Date.now()}.jpg`, type: 'image/jpeg' });
       const res = await elearningService.uploadExamSnapshot(examId, fd);
+      if (res.multiple_faces) {
+        handleFraudBlock('Une autre personne a été détectée à côté ou derrière le candidat.');
+        return res.ai_available === false;
+      }
+      const gazeStreakNeeded = Math.max(1, Math.round(((exam?.gaze_away_seconds || 30) * 1000) / DETECT_INTERVAL));
       if (res.looking_away) {
         gazeAwayStreakRef.current += 1;
-        if (gazeAwayStreakRef.current >= GAZE_AWAY_STREAK_FOR_30S) {
+        if (gazeAwayStreakRef.current >= gazeStreakNeeded) {
           gazeAwayStreakRef.current = 0;
-          handleFraudBlock('Regard détourné de l\'écran détecté pendant plus de 30 secondes.');
+          handleFraudBlock(`Regard détourné de l'écran détecté pendant plus de ${exam?.gaze_away_seconds || 30} secondes.`);
         }
       } else {
         gazeAwayStreakRef.current = 0;
@@ -618,7 +622,7 @@ export default function SecureExamTakeScreen({ route, navigation }) {
       // off from too (no point retrying every 5s into whatever's failing).
       return true;
     }
-  }, [examId, handleFraudBlock]);
+  }, [examId, handleFraudBlock, exam?.gaze_away_seconds]);
 
   const onWebcamLost = useCallback((detail) => {
     if (lostReported.current) return;
