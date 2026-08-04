@@ -44,8 +44,9 @@ export default function StudentFinanceScreen({ navigation }) {
   const [preparingInvoices, setPreparingInvoices] = useState(false);
   const [payModal,          setPayModal]          = useState({ visible: false, invoice: null, fixedAmount: null, label: '' });
   const [freePayVisible,    setFreePayVisible]    = useState(false);
-  // CinetPay online checkout — alternative to the manual Mobile Money flow
-  // above, reuses the same target invoice/student.
+  // CinetPay online checkout — the PRIMARY payment method (instant, no
+  // admin validation needed, unlike the manual Mobile Money declaration
+  // below which stays available as a fallback).
   const [cinetPayInvoice, setCinetPayInvoice] = useState(null);
   const [freeCinetPayVisible, setFreeCinetPayVisible] = useState(false);
   const [errorModal,        setErrorModal]        = useState({ visible: false, message: '' });
@@ -245,12 +246,12 @@ export default function StudentFinanceScreen({ navigation }) {
           <PaymentTab
             summary={summary} invoices={invoices} payments={payments} echeancier={echeancier}
             pct={pct} tuition={tuition} paid={paid} remaining={remaining}
-            onPayPress={openPayModal}
+            onPayPress={(invoice) => setCinetPayInvoice(invoice)}
             onPrepareInvoices={handlePrepareInvoices}
             preparingInvoices={preparingInvoices}
-            onFreePay={() => setFreePayVisible(true)}
-            onPayPressOnline={(invoice) => setCinetPayInvoice(invoice)}
-            onFreePayOnline={() => setFreeCinetPayVisible(true)}
+            onFreePay={() => setFreeCinetPayVisible(true)}
+            onPayPressManual={openPayModal}
+            onFreePayManual={() => setFreePayVisible(true)}
           />
         </ScrollView>
 
@@ -284,9 +285,9 @@ export default function StudentFinanceScreen({ navigation }) {
                 <Text style={styles.dueDate}>Échéance : {new Date(item.due_date).toLocaleDateString('fr-FR')}</Text>
               )}
               {parseFloat(item.balance) > 0 && item.status !== 'CANCELLED' && (
-                <TouchableOpacity style={styles.payBtn} onPress={() => openPayModal(item)} activeOpacity={0.8}>
-                  <Ionicons name="phone-portrait-outline" size={16} color="#fff" />
-                  <Text style={styles.payBtnText}>Payer avec Mobile Money</Text>
+                <TouchableOpacity style={styles.payBtn} onPress={() => setCinetPayInvoice(item)} activeOpacity={0.8}>
+                  <Ionicons name="flash-outline" size={16} color="#fff" />
+                  <Text style={styles.payBtnText}>Payer maintenant</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -349,7 +350,7 @@ export default function StudentFinanceScreen({ navigation }) {
         onSuccess={() => { setFreePayVisible(false); fetchData(); }}
       />
 
-      {/* ── CinetPay online checkout — alternative to the manual flows above ── */}
+      {/* ── CinetPay online checkout — primary payment method (see comment above) ── */}
       <PaymentModal
         visible={!!cinetPayInvoice}
         invoice={cinetPayInvoice}

@@ -70,11 +70,13 @@ export function FinStat({ label, value, paid, danger }) {
    ══════════════════════════════════════════════════════════════════════════ */
 
 export function PaymentTab({ summary, invoices, payments, pct, tuition, paid, remaining,
+  // Primary action — CinetPay, instantané (aucune validation admin : le
+  // paiement est confirme et applique a la facture automatiquement).
   onPayPress, onPrepareInvoices, preparingInvoices, onFreePay, echeancier,
-  // Optional — CinetPay checkout as an alternative to the manual Mobile
-  // Money proof-upload flow above (onPayPress/onFreePay). Only rendered
-  // when provided, so screens that don't wire them up are unaffected.
-  onPayPressOnline, onFreePayOnline,
+  // Optional — Mobile Money manuel (preuve a l'appui, validee ensuite par
+  // un admin) comme option de secours, en second plan. Only rendered when
+  // provided, so screens that don't wire them up are unaffected.
+  onPayPressManual, onFreePayManual,
   prepareTitle = 'Préparer mon dossier de paiement',
   prepareSub = 'Appuyez pour créer vos factures et activer le paiement' }) {
 
@@ -136,10 +138,10 @@ export function PaymentTab({ summary, invoices, payments, pct, tuition, paid, re
         <Ionicons name="add-circle-outline" size={16} color={colors.primary} />
         <Text style={styles.freePayBtnText}>Paiement libre — autre montant</Text>
       </TouchableOpacity>
-      {onFreePayOnline && (
-        <TouchableOpacity style={styles.onlinePayLink} onPress={onFreePayOnline} activeOpacity={0.7}>
-          <Ionicons name="card-outline" size={14} color={colors.primary} />
-          <Text style={styles.onlinePayLinkText}>ou payer en ligne (CinetPay)</Text>
+      {onFreePayManual && (
+        <TouchableOpacity style={styles.onlinePayLink} onPress={onFreePayManual} activeOpacity={0.7}>
+          <Ionicons name="document-text-outline" size={14} color={colors.primary} />
+          <Text style={styles.onlinePayLinkText}>ou déclarer un paiement Mobile Money (avec preuve)</Text>
         </TouchableOpacity>
       )}
 
@@ -224,13 +226,13 @@ export function PaymentTab({ summary, invoices, payments, pct, tuition, paid, re
           {payTarget && parseFloat(payTarget.balance) > 0 && (
             <>
               <TouchableOpacity style={styles.payBtn} onPress={() => onPayPress(payTarget)} activeOpacity={0.8}>
-                <Ionicons name="phone-portrait-outline" size={16} color="#fff" />
-                <Text style={styles.payBtnText}>Payer {fmt(payTarget.balance)} — Mobile Money</Text>
+                <Ionicons name="flash-outline" size={16} color="#fff" />
+                <Text style={styles.payBtnText}>Payer {fmt(payTarget.balance)} maintenant</Text>
               </TouchableOpacity>
-              {onPayPressOnline && (
-                <TouchableOpacity style={styles.onlinePayLink} onPress={() => onPayPressOnline(payTarget)} activeOpacity={0.7}>
-                  <Ionicons name="card-outline" size={14} color={colors.primary} />
-                  <Text style={styles.onlinePayLinkText}>ou payer en ligne (CinetPay)</Text>
+              {onPayPressManual && (
+                <TouchableOpacity style={styles.onlinePayLink} onPress={() => onPayPressManual(payTarget)} activeOpacity={0.7}>
+                  <Ionicons name="document-text-outline" size={14} color={colors.primary} />
+                  <Text style={styles.onlinePayLinkText}>ou déclarer un paiement Mobile Money (avec preuve)</Text>
                 </TouchableOpacity>
               )}
             </>
